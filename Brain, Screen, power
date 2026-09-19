@@ -1,0 +1,150 @@
+BRAIN UNIT — POWER + DISPLAY
+1. Power path (battery → ESP32-S3)
+Battery → TP4056 charger → switch → MT3608 boost (5.00V) → ESP32-S3 "5V" pin
+
+Why every part is needed:
+
+Charger board – charges the cell and protects it from over-discharge/short. Required.
+Switch – turns the whole unit off, and lets you charge with the unit off. Required.
+Boost converter – a LiPo is 3.0–4.2V. The board's 5V pin needs a real 5V. Required.
+Capacitor – smooths the boost output so the ESP32 doesn't reset during BLE/display bursts. Strongly recommended.
+
+Note on 700mAh: ESP32-S3 + display will pull roughly 0.5–0.7A from the battery at peaks. That's near 1C for a 700mAh cell. It will work, but expect ~1–1.5 hours runtime and check the battery for warmth in the first test.
+
+2. Power wiring — exact connections
+
+Before soldering anything: meter on the battery leads. Whichever lead reads positive is +. Ignore wire color.
+
+From	To
+Battery +	Charger B+
+Battery –	Charger B–
+Charger OUT+	Switch middle pin
+Switch right pin	Boost VIN+
+Charger OUT–	Boost VIN–
+Switch left pin	nothing — heat-shrink it
+
+STOP HERE. Switch on. Meter on VOUT+ / VOUT–. Turn the blue screw until it reads 5.00V. (Many turns — it's slow. If it doesn't move, keep turning; the trimmer often needs 10+ turns before anything changes.) Switch off, then on again, confirm it's still 5.00V.
+
+Then continue:
+
+From	To
+Boost VOUT+	ESP32-S3 pin marked 5V
+Boost VOUT–	ESP32-S3 pin marked GND
+Capacitor + (long leg / no stripe)	Boost VOUT+
+Capacitor – (stripe side)	Boost VOUT–
+
+Capacitor: 220–470µF, rated 10V or more. Solder it right at the boost output pads. If you have a 0.1µF ceramic, put it across the same two pads (no polarity).
+
+Hard rule: When the switch is ON, do not plug USB into the ESP32. Two 5V sources fighting can damage the board. USB only when the switch is OFF.
+
+3. Display wiring (LCD → ESP32-S3)
+Display pin	ESP32-S3 pin
+GND	GND
+VCC	3V3 (see section 4)
+SCK	GPIO 12
+SDA	GPIO 11
+RST	GPIO 10
+DC	GPIO 9
+CS	GPIO 8
+
+Wires under 10cm. Never connect or disconnect the display while the board is powered.
+
+4. LCD VCC: 3.3V or 5V?
+
+Use 3.3V. Here's the logic:
+
+The display controller chip itself is a 3.3V part. 5V straight to it kills it.
+Some modules have a small 3-pin regulator on the back so they can take 5V. If yours has one, 3.3V still works fine (regulator just passes it through slightly lower).
+So 3.3V is the only choice that cannot destroy the display no matter which version you have.
+
+What to check first (30 seconds): Flip the display over. Look near the VCC pin for a tiny 3-pin chip marked 662K, 4A2, or similar.
+
+Found one → 3.3V works, 5V would also work. Use 3.3V anyway.
+No chip → 3.3V is the only safe option.
+
+Either way: VCC → 3V3. The board's 3.3V regulator has plenty of margin for the ~60–80mA the screen draws.
+
+5. Are GPIO 8–12 safe on this board?
+
+Yes. Checked against the ESP32-S3 datasheet:
+
+Boot/strapping pins are 0, 3, 45, 46 — not used here.
+USB is 19, 20 — not used.
+Flash is 26–32 — not used, not broken out.
+PSRAM (the R8 part) is 33–37 — not used.
+UART0 is 43, 44 — not used.
+Onboard RGB LED is 48 (sometimes 38) — not used.
+GPIO 10, 11, 12 are actually the chip's native SPI pins — best possible choice for a display.
+
+Nothing to worry about. Do not change these to anything in the ranges above.
+
+6. Test before permanent wiring
+
+A. Power chain, no ESP32 attached
+
+Boost reads 5.00V unloaded ✔
+Switch OFF → VIN+ reads 0V ✔
+Charger: plug USB-C into the charger board with the switch OFF. Red/blue LED lights, board barely warm. ✔
+Meter between the wire going to the "5V" pin and the wire going to "GND": reads +5.00V (positive, not negative). ✔
+
+B. Display on USB (no battery yet)
+Wire display per section 3. Plug ESP32 USB. Run the test sketch below.
+
+C. Battery last
+Unplug USB. Connect boost output. Switch on. Board boots, display works.
+
+7. Step-by-step order
+Step 1 — ESP32 alone, USB
+
+Plug in the UART USB port. Upload a blank sketch with Serial.println("alive"). Confirm serial output. Done.
+
+Step 2 — Display, still USB
+
+Wire the 7 display wires. Install TFT_eSPI library. In its User_Setup.h, comment out everything else and set:
+
+#define ST7789_DRIVER        // try this first
+#define TFT_WIDTH  240
+#define TFT_HEIGHT 320
+#define TFT_MOSI 11
+#define TFT_SCLK 12
+#define TFT_CS    8
+#define TFT_DC    9
+#define TFT_RST  10
+#define TFT_MISO -1
+#define LOAD_GLCD
+#define SPI_FREQUENCY 27000000
+
+Test sketch:
+
+#include <TFT_eSPI.h>
+TFT_eSPI tft;
+void setup() {
+  tft.init(); tft.setRotation(0);
+  tft.fillScreen(TFT_RED);   delay(500);
+  tft.fillScreen(TFT_GREEN); delay(500);
+  tft.fillScreen(TFT_BLUE);  delay(500);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE); tft.setTextSize(3);
+  tft.drawString("OK", 80, 140);
+}
+void loop() {}
+Red, green, blue, "OK" → driver correct. Done.
+Colors wrong/inverted → add #define TFT_INVERSION_ON or TFT_RGB_ORDER TFT_BGR.
+Garbage/blank → change ST7789_DRIVER to ILI9341_DRIVER and retry. Wrong driver can't damage anything, only shows junk.
+Still blank → backlight on but no image = wiring order; check SCK/SDA aren't swapped.
+Step 3 — Battery power
+Unplug USB.
+Connect boost VOUT+ → 5V, VOUT– → GND (with capacitor already on).
+Switch ON. Display shows the test.
+Meter across the 5V/GND pins while it runs: should stay 4.8–5.1V.
+Run 15 minutes. Touch the boost inductor, the battery, the ESP32 regulator. Warm is fine. Too hot to hold = stop.
+Switch OFF, charge via charger USB-C, confirm the charge LED changes when full.
+
+Only after this passes do you put anything in the tin.
+
+Don't
+Don't plug ESP32 USB in while the switch is on.
+Don't put 5V on VCC — 3V3 only.
+Don't touch the blue screw once the ESP32 is connected.
+Don't connect/disconnect the display while powered.
+Don't let any board underside touch the tin.
