@@ -1,4 +1,5 @@
 BRAIN UNIT — POWER + DISPLAY
+Full picture of every wire: see "Wiring diagram.png" / "Wiring diagram.svg" in this repo.
 1. Power path (battery → ESP32-S3)
 Battery → TP4056 charger → switch → MT3608 boost (5.00V) → ESP32-S3 "5V" pin
 
@@ -39,7 +40,7 @@ Boost VOUT–	ESP32-S3 pin marked GND
 Capacitor + (long leg / no stripe)	Boost VOUT+
 Capacitor – (stripe side)	Boost VOUT–
 
-Capacitor: 220–470µF, rated 10V or more. Solder it right at the boost output pads. If you have a 0.1µF ceramic, put it across the same two pads (no polarity).
+Capacitor: 220–470µF electrolytic, rated 10V or more. Solder it right at the boost output pads. No ceramic capacitor needed — the MT3608 and ESP32 boards already have small ceramics on board. (Optional later: a 0.1µF ceramic across the same pads only if you get random resets.)
 
 Hard rule: When the switch is ON, do not plug USB into the ESP32. Two 5V sources fighting can damage the board. USB only when the switch is OFF.
 

@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" width="1200" height="900" font-family="Arial, Helvetica, sans-serif">
+<title>Altoids Gameboy brain unit wiring: battery, TP4056, switch, MT3608, capacitor, ESP32-S3 and GMT024-10 display</title>
+<rect x="0" y="0" width="1200" height="900" fill="#ffffff"/>
+<text x="30" y="42" font-size="24" font-weight="bold" fill="#111">Altoids Gameboy — Brain Unit Wiring (what goes where)</text>
+<text x="30" y="66" font-size="14" fill="#555">ESP32-S3 N16R8 · GMT024-10 V2.1 2.4" ST7789 display · 700mAh LiPo · TP4056 · MT3608 set to 5.00V · no ceramic capacitor needed</text>
+<rect x="30" y="100" width="140" height="170" rx="8" fill="#f4f6f8" stroke="#333" stroke-width="1.5"/>
+<text x="100.0" y="124" font-size="16" font-weight="bold" text-anchor="middle" fill="#111">LiPo Battery</text>
+<text x="100.0" y="142" font-size="12" text-anchor="middle" fill="#555">3.7V 700mAh</text>
+<circle cx="170" cy="150" r="4.5" fill="#111"/>
+<text x="160" y="155" font-size="14" font-weight="bold" text-anchor="end" fill="#111">+</text>
+<circle cx="170" cy="230" r="4.5" fill="#111"/>
+<text x="160" y="235" font-size="14" font-weight="bold" text-anchor="end" fill="#111">–</text>
+<rect x="250" y="100" width="170" height="170" rx="8" fill="#f4f6f8" stroke="#333" stroke-width="1.5"/>
+<text x="335.0" y="124" font-size="16" font-weight="bold" text-anchor="middle" fill="#111">TP4056</text>
+<text x="335.0" y="142" font-size="12" text-anchor="middle" fill="#555">charger + protection</text>
+<circle cx="250" cy="150" r="4.5" fill="#111"/>
+<text x="260" y="155" font-size="14" font-weight="bold" fill="#111">B+</text>
+<circle cx="250" cy="230" r="4.5" fill="#111"/>
+<text x="260" y="235" font-size="14" font-weight="bold" fill="#111">B–</text>
+<circle cx="420" cy="150" r="4.5" fill="#111"/>
+<text x="410" y="155" font-size="14" font-weight="bold" text-anchor="end" fill="#111">OUT+</text>
+<circle cx="420" cy="230" r="4.5" fill="#111"/>
+<text x="410" y="235" font-size="14" font-weight="bold" text-anchor="end" fill="#111">OUT–</text>
+<rect x="500" y="100" width="130" height="85" rx="8" fill="#f4f6f8" stroke="#333" stroke-width="1.5"/>
+<text x="565.0" y="124" font-size="16" font-weight="bold" text-anchor="middle" fill="#111">Slide Switch</text>
+<circle cx="500" cy="150" r="4.5" fill="#111"/>
+<text x="510" y="155" font-size="14" font-weight="bold" fill="#111">MID</text>
+<circle cx="630" cy="150" r="4.5" fill="#111"/>
+<text x="620" y="155" font-size="14" font-weight="bold" text-anchor="end" fill="#111">RIGHT</text>
+<text x="565" y="178" font-size="11" text-anchor="middle" fill="#777" font-weight="bold">LEFT pin: no wire</text>
+<rect x="710" y="100" width="180" height="170" rx="8" fill="#f4f6f8" stroke="#333" stroke-width="1.5"/>
+<text x="800.0" y="124" font-size="16" font-weight="bold" text-anchor="middle" fill="#111">MT3608 Boost</text>
+<text x="800.0" y="142" font-size="12" text-anchor="middle" fill="#555">set to 5.00V first</text>
+<circle cx="710" cy="150" r="4.5" fill="#111"/>
+<text x="720" y="155" font-size="14" font-weight="bold" fill="#111">VIN+</text>
+<circle cx="710" cy="230" r="4.5" fill="#111"/>
+<text x="720" y="235" font-size="14" font-weight="bold" fill="#111">VIN–</text>
+<circle cx="890" cy="150" r="4.5" fill="#111"/>
+<text x="880" y="155" font-size="14" font-weight="bold" text-anchor="end" fill="#111">VOUT+</text>
+<circle cx="890" cy="230" r="4.5" fill="#111"/>
+<text x="880" y="235" font-size="14" font-weight="bold" text-anchor="end" fill="#111">VOUT–</text>
+<path d="M170,150 L250,150" fill="none" stroke="#d62728" stroke-width="3.5" stroke-linejoin="round"/>
+<path d="M170,230 L250,230" fill="none" stroke="#222222" stroke-width="3.5" stroke-linejoin="round"/>
+<path d="M420,150 L500,150" fill="none" stroke="#d62728" stroke-width="3.5" stroke-linejoin="round"/>
+<path d="M630,150 L710,150" fill="none" stroke="#d62728" stroke-width="3.5" stroke-linejoin="round"/>
+<path d="M420,230 L710,230" fill="none" stroke="#222222" stroke-width="3.5" stroke-linejoin="round"/>
+<text x="210" y="140" font-size="12" text-anchor="middle" fill="#d62728" font-weight="bold">+</text>
+<text x="210" y="220" font-size="12" text-anchor="middle" fill="#222222" font-weight="bold">–</text>
+<text x="565" y="222" font-size="12" text-anchor="middle" fill="#222222" font-weight="bold">OUT– → VIN– (direct)</text>
+<path d="M890,150 L1060,150 L1060,480 L880,480" fill="none" stroke="#d62728" stroke-width="3.5" stroke-linejoin="round"/>
+<path d="M890,230 L1010,230 L1010,430 L880,430" fill="none" stroke="#222222" stroke-width="3.5" stroke-linejoin="round"/>
+<path d="M950,150 L950,183" fill="none" stroke="#d62728" stroke-width="2.5" stroke-linejoin="round"/>
+<path d="M950,197 L950,230" fill="none" stroke="#222222" stroke-width="2.5" stroke-linejoin="round"/>
+<line x1="934" y1="183" x2="966" y2="183" stroke="#111" stroke-width="3"/>
+<path d="M934,199 Q950,191 966,199" fill="none" stroke="#111" stroke-width="3"/>
+<circle cx="950" cy="150" r="4" fill="#d62728"/><circle cx="950" cy="230" r="4" fill="#222222"/>
+<text x="928" y="181" font-size="15" text-anchor="end" fill="#d62728" font-weight="bold">+</text>
+<text x="1000" y="296" font-size="11" text-anchor="end" fill="#111" font-weight="bold">Capacitor 220–470µF ≥10V</text>
+<text x="1000" y="311" font-size="11" text-anchor="end" fill="#555" font-weight="bold">long leg + to VOUT+</text>
+<text x="1000" y="326" font-size="11" text-anchor="end" fill="#555" font-weight="bold">stripe – to VOUT–</text>
+<text x="1070" y="320" font-size="13" text-anchor="start" fill="#d62728" font-weight="bold">5V</text>
+<text x="1020" y="360" font-size="13" text-anchor="start" fill="#222222" font-weight="bold">GND</text>
+<rect x="620" y="380" width="260" height="370" rx="8" fill="#f4f6f8" stroke="#333" stroke-width="1.5"/>
+<text x="750.0" y="404" font-size="16" font-weight="bold" text-anchor="middle" fill="#111">ESP32-S3 N16R8</text>
+<text x="750.0" y="422" font-size="12" text-anchor="middle" fill="#555">dev board</text>
+<circle cx="880" cy="430" r="4.5" fill="#111"/>
+<text x="870" y="435" font-size="14" font-weight="bold" text-anchor="end" fill="#111">GND</text>
+<circle cx="880" cy="480" r="4.5" fill="#111"/>
+<text x="870" y="485" font-size="14" font-weight="bold" text-anchor="end" fill="#111">5V</text>
+<rect x="150" y="380" width="210" height="370" rx="8" fill="#f4f6f8" stroke="#333" stroke-width="1.5"/>
+<text x="255.0" y="404" font-size="16" font-weight="bold" text-anchor="middle" fill="#111">2.4" TFT Display</text>
+<text x="255.0" y="422" font-size="12" text-anchor="middle" fill="#555">GMT024-10 V2.1 (ST7789)</text>
+<circle cx="360" cy="440" r="4.5" fill="#111"/>
+<text x="350" y="445" font-size="14" font-weight="bold" text-anchor="end" fill="#111">GND</text>
+<circle cx="620" cy="440" r="4.5" fill="#111"/>
+<text x="630" y="445" font-size="14" font-weight="bold" fill="#111">GND</text>
+<path d="M360,440 L620,440" fill="none" stroke="#222222" stroke-width="3.5" stroke-linejoin="round"/>
+<text x="490.0" y="432" font-size="12" text-anchor="middle" fill="#222222" font-weight="bold">ground</text>
+<circle cx="360" cy="485" r="4.5" fill="#111"/>
+<text x="350" y="490" font-size="14" font-weight="bold" text-anchor="end" fill="#111">VCC</text>
+<circle cx="620" cy="485" r="4.5" fill="#111"/>
+<text x="630" y="490" font-size="14" font-weight="bold" fill="#111">3V3</text>
+<path d="M360,485 L620,485" fill="none" stroke="#ff8c00" stroke-width="3.5" stroke-linejoin="round"/>
+<text x="490.0" y="477" font-size="12" text-anchor="middle" fill="#ff8c00" font-weight="bold">3.3V only</text>
+<circle cx="360" cy="530" r="4.5" fill="#111"/>
+<text x="350" y="535" font-size="14" font-weight="bold" text-anchor="end" fill="#111">SCK</text>
+<circle cx="620" cy="530" r="4.5" fill="#111"/>
+<text x="630" y="535" font-size="14" font-weight="bold" fill="#111">GPIO 12</text>
+<path d="M360,530 L620,530" fill="none" stroke="#b8860b" stroke-width="3.5" stroke-linejoin="round"/>
+<text x="490.0" y="522" font-size="12" text-anchor="middle" fill="#b8860b" font-weight="bold">SPI clock</text>
+<circle cx="360" cy="575" r="4.5" fill="#111"/>
+<text x="350" y="580" font-size="14" font-weight="bold" text-anchor="end" fill="#111">SDA</text>
+<circle cx="620" cy="575" r="4.5" fill="#111"/>
+<text x="630" y="580" font-size="14" font-weight="bold" fill="#111">GPIO 11</text>
+<path d="M360,575 L620,575" fill="none" stroke="#1f77b4" stroke-width="3.5" stroke-linejoin="round"/>
+<text x="490.0" y="567" font-size="12" text-anchor="middle" fill="#1f77b4" font-weight="bold">SPI data (MOSI)</text>
+<circle cx="360" cy="620" r="4.5" fill="#111"/>
+<text x="350" y="625" font-size="14" font-weight="bold" text-anchor="end" fill="#111">RST</text>
+<circle cx="620" cy="620" r="4.5" fill="#111"/>
+<text x="630" y="625" font-size="14" font-weight="bold" fill="#111">GPIO 10</text>
+<path d="M360,620 L620,620" fill="none" stroke="#9467bd" stroke-width="3.5" stroke-linejoin="round"/>
+<text x="490.0" y="612" font-size="12" text-anchor="middle" fill="#9467bd" font-weight="bold">reset</text>
+<circle cx="360" cy="665" r="4.5" fill="#111"/>
+<text x="350" y="670" font-size="14" font-weight="bold" text-anchor="end" fill="#111">DC</text>
+<circle cx="620" cy="665" r="4.5" fill="#111"/>
+<text x="630" y="670" font-size="14" font-weight="bold" fill="#111">GPIO 9</text>
+<path d="M360,665 L620,665" fill="none" stroke="#2ca02c" stroke-width="3.5" stroke-linejoin="round"/>
+<text x="490.0" y="657" font-size="12" text-anchor="middle" fill="#2ca02c" font-weight="bold">data/command</text>
+<circle cx="360" cy="710" r="4.5" fill="#111"/>
+<text x="350" y="715" font-size="14" font-weight="bold" text-anchor="end" fill="#111">CS</text>
+<circle cx="620" cy="710" r="4.5" fill="#111"/>
+<text x="630" y="715" font-size="14" font-weight="bold" fill="#111">GPIO 8</text>
+<path d="M360,710 L620,710" fill="none" stroke="#17becf" stroke-width="3.5" stroke-linejoin="round"/>
+<text x="490.0" y="702" font-size="12" text-anchor="middle" fill="#17becf" font-weight="bold">chip select</text>
+<text x="750.0" y="735" font-size="11" text-anchor="middle" fill="#555" font-weight="bold">All GND pins are the same</text>
+<text x="255.0" y="735" font-size="11" text-anchor="middle" fill="#555" font-weight="bold">No backlight pin · no MISO</text>
+<rect x="30" y="775" width="1140" height="110" rx="8" fill="#fff8e6" stroke="#e0a800" stroke-width="1.5"/>
+<text x="50" y="803" font-size="14" fill="#111">1. Meter the battery leads first: + is what the meter says, not the wire color.</text>
+<text x="50" y="827" font-size="14" fill="#111">2. Set the MT3608 to 5.00V with NOTHING connected to its output, then wire the ESP32.</text>
+<text x="50" y="851" font-size="14" fill="#111">3. Never plug USB into the ESP32 while the switch is ON (two 5V sources fighting).</text>
+<text x="50" y="875" font-size="14" fill="#111">4. Display VCC → 3V3 only. Never 5V on VCC or any signal pin. Add #define USE_HSPI_PORT in TFT_eSPI.</text>
+</svg>
