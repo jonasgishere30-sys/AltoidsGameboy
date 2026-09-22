@@ -9,7 +9,13 @@ Switch – turns the whole unit off, and lets you charge with the unit off. Requ
 Boost converter – a LiPo is 3.0–4.2V. The board's 5V pin needs a real 5V. Required.
 Capacitor – smooths the boost output so the ESP32 doesn't reset during BLE/display bursts. Strongly recommended.
 
-Note on 700mAh: ESP32-S3 + display will pull roughly 0.5–0.7A from the battery at peaks. That's near 1C for a 700mAh cell. It will work, but expect ~1–1.5 hours runtime and check the battery for warmth in the first test.
+Note on 700mAh: ESP32-S3 + display will pull roughly 0.5–0.7A from the battery at short peaks. That's near 1C for a 700mAh cell. It will work, but check the battery for warmth in the first test. Runtime is NOT measured yet — rough estimate 1.5–3 hours with BLE + screen on. Measure it in Step 3 before trusting any number.
+
+Charge-current warning (CHECK BEFORE FIRST CHARGE):
+Most TP4056 boards come set to about 0.9–1A charging (programming resistor, usually labeled R3, marked "122" = 1.2kΩ). That is more than 1C for a 700mAh cell, which is above what most small LiPos are rated for.
+- Check your battery's max charge current (label or listing). If it is 1C or lower (≤700mA), change R3 to 2kΩ (marked "202") → about 580mA. 3kΩ ("302") → about 400mA, even gentler.
+- If you can't change the resistor yet: charge only while you're watching, on a non-flammable surface, and stop if the battery gets warm or puffs.
+TP4056 RPROG table: 1.2kΩ ≈ 0.9–1A, 2kΩ ≈ 580mA, 5kΩ ≈ 250mA.
 
 2. Power wiring — exact connections
 
@@ -49,20 +55,21 @@ CS	GPIO 8
 
 Wires under 10cm. Never connect or disconnect the display while the board is powered.
 
+Verified for this exact module (GMT024-10 V2.1, 2.4", 240x320):
+- Controller: ST7789. SPI, 3.3V logic → wires go straight to ESP32 GPIOs, no level shifter.
+- 7 pins total. There is NO backlight (BLK/LED) pin — the backlight is tied to VCC inside the module, so it turns on whenever VCC is powered. Nothing else to wire.
+- There is NO MISO pin → TFT_MISO -1 is correct.
+- "SDA" is SPI data (MOSI), not I2C.
+
 4. LCD VCC: 3.3V or 5V?
 
-Use 3.3V. Here's the logic:
+Use 3.3V.
 
-The display controller chip itself is a 3.3V part. 5V straight to it kills it.
-Some modules have a small 3-pin regulator on the back so they can take 5V. If yours has one, 3.3V still works fine (regulator just passes it through slightly lower).
-So 3.3V is the only choice that cannot destroy the display no matter which version you have.
+The seller spec for GMT024-10 V2.1 says VCC 3.3V–5V, logic 3.3V. So 3.3V is inside the rated range, and it's the choice that cannot hurt the display even if you got a different variant.
 
-What to check first (30 seconds): Flip the display over. Look near the VCC pin for a tiny 3-pin chip marked 662K, 4A2, or similar.
+Optional 30-second check: flip the display over. A tiny 3-pin chip near VCC (marked 662K, 4A2, or similar) is the regulator that makes 5V allowed. Either way, still use 3.3V.
 
-Found one → 3.3V works, 5V would also work. Use 3.3V anyway.
-No chip → 3.3V is the only safe option.
-
-Either way: VCC → 3V3. The board's 3.3V regulator has plenty of margin for the ~60–80mA the screen draws.
+VCC → 3V3. Never 5V on any signal pin (SCK, SDA, RST, DC, CS). The board's 3.3V regulator has plenty of margin for the ~60–80mA the screen draws.
 
 5. Are GPIO 8–12 safe on this board?
 
@@ -71,7 +78,7 @@ Yes. Checked against the ESP32-S3 datasheet:
 Boot/strapping pins are 0, 3, 45, 46 — not used here.
 USB is 19, 20 — not used.
 Flash is 26–32 — not used, not broken out.
-PSRAM (the R8 part) is 33–37 — not used.
+PSRAM (the R8 part) is 33–37 — not used. Note: 35, 36, 37 ARE on the header on many boards, but on N16R8 they are wired to the PSRAM. Never use them.
 UART0 is 43, 44 — not used.
 Onboard RGB LED is 48 (sometimes 38) — not used.
 GPIO 10, 11, 12 are actually the chip's native SPI pins — best possible choice for a display.
@@ -96,6 +103,12 @@ Unplug USB. Connect boost output. Switch on. Board boots, display works.
 7. Step-by-step order
 Step 1 — ESP32 alone, USB
 
+Arduino IDE board settings (Tools menu):
+- Board: ESP32S3 Dev Module
+- Flash Size: 16MB
+- PSRAM: OPI PSRAM (N16R8 = octal PSRAM. "QSPI PSRAM" is wrong for this board)
+- USB CDC On Boot: Disabled (when using the UART/COM port)
+
 Plug in the UART USB port. Upload a blank sketch with Serial.println("alive"). Confirm serial output. Done.
 
 Step 2 — Display, still USB
@@ -105,6 +118,7 @@ Wire the 7 display wires. Install TFT_eSPI library. In its User_Setup.h, comment
 #define ST7789_DRIVER        // try this first
 #define TFT_WIDTH  240
 #define TFT_HEIGHT 320
+#define USE_HSPI_PORT        // REQUIRED on ESP32-S3 with ESP32 board package 2.0.15 or newer (incl. 3.x)
 #define TFT_MOSI 11
 #define TFT_SCLK 12
 #define TFT_CS    8
@@ -128,9 +142,14 @@ void setup() {
   tft.drawString("OK", 80, 140);
 }
 void loop() {}
+
+Why USE_HSPI_PORT is required: in ESP32 board package 3.x, FSPI = 0 on the S3. TFT_eSPI's default uses FSPI as its register address, which points to address 0 → the board crashes / boot-loops at tft.init(). USE_HSPI_PORT makes it use the S3's second SPI bus (SPI3), which works with any pins including 8–12. (Verified: compiles on ESP32 core 3.3.12 + TFT_eSPI 2.5.43; also compiles together with the NimBLE keyboard code.)
+Back up your User_Setup.h — updating TFT_eSPI overwrites it.
+
 Red, green, blue, "OK" → driver correct. Done.
-Colors wrong/inverted → add #define TFT_INVERSION_ON or TFT_RGB_ORDER TFT_BGR.
-Garbage/blank → change ST7789_DRIVER to ILI9341_DRIVER and retry. Wrong driver can't damage anything, only shows junk.
+Board reboots in a loop / "Guru Meditation" at tft.init() → USE_HSPI_PORT is missing or User_Setup.h wasn't saved.
+Colors wrong/inverted → add #define TFT_INVERSION_ON (or #define TFT_INVERSION_OFF), or #define TFT_RGB_ORDER TFT_BGR.
+Garbage/blank → this module is verified ST7789, so re-check the 7 wires first. Then try ST7789_2_DRIVER. Wrong driver can't damage anything, only shows junk.
 Still blank → backlight on but no image = wiring order; check SCK/SDA aren't swapped.
 Step 3 — Battery power
 Unplug USB.
