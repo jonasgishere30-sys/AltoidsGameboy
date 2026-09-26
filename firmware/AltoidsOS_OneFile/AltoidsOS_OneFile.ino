@@ -1,4 +1,4 @@
-// Altoids Gameboy - Arcade OS v1.4 (landscape) - SINGLE FILE: just open this .ino and upload
+// Altoids Gameboy - Arcade OS v1.5 (landscape) - SINGLE FILE: just open this .ino and upload
 // Boot animation, menu and 6 built-in games, controlled with the CardKB2 over BLE.
 //
 // Board:    ESP32-S3 N16R8 -> Tools: "ESP32S3 Dev Module", Flash Size 16MB,
@@ -55,7 +55,7 @@ static const uint16_t C_BLUE   = rgb(96, 165, 250);
 // ---- Types used by the drawing functions (kept above every function so the
 //      sketch also compiles as one single .ino file) ----
 enum Font { F_SMALL, F_REG, F_BOLD, F_BIG, F_HUGE };
-enum Icon { IC_SNAKE, IC_BLOCKS, IC_PONG, IC_BREAKOUT, IC_FLAPPY, IC_2048, IC_SETTINGS, IC_ABOUT, IC_AI };
+enum Icon { IC_SNAKE, IC_BLOCKS, IC_PONG, IC_BREAKOUT, IC_FLAPPY, IC_RACE, IC_SETTINGS, IC_ABOUT, IC_AI };
 struct Mascot {
   float cx = 120, cy = 130, s = 0.5f;  // centre of the screen box at rest
   float look = 0;       // -1 left .. 1 right
@@ -1740,112 +1740,380 @@ struct FlappyGame : Game {
   }
 };
 
-struct Game2048 : Game {
-  static const int TS = 48, GAPP = 4, GX = 12, GY = 31;
-  uint16_t t[4][4]; uint32_t popAt[4][4]; bool won, keepGoing;
-  const char* saveKey() override { return "2048"; }
+// Turbo - pseudo-3D arcade racer (OutRun style).
+// Gas is automatic. Z/C (or arrows) steer, X brakes, D / SPACE = nitro.
+// Reach each checkpoint before the timer runs out. Overtaking cars gives bonus points.
+struct RacerGame : Game {
+  // world units
+  static const int SEG_LEN = 200, ROAD_W = 2000, CAM_H = 1000, DRAW = 150, MAXSEG = 1700;
+  static const int RUMBLE = 3, N_CARS = 12, CP_EVERY = 300, N_PROPS = 2;
+  static constexpr float DEPTH = 0.84f;                 // 1 / tan(fov / 2), fov ~100 deg
+  static constexpr float PLAYER_Z = CAM_H * DEPTH;      // distance from camera to the player's car
+  static constexpr float MAX_SPEED = SEG_LEN * 60.0f;   // 60 segments per second
+  static constexpr float CAR_W = 560;                   // car width in world units
+  static constexpr float CENTRIFUGAL = 0.3f;
 
-  void addTile(uint32_t now) {
-    int free[16], n = 0;
-    for (int i = 0; i < 16; i++) if (!t[i / 4][i % 4]) free[n++] = i;
-    if (!n) return;
-    int k = free[plat_random(n)];
-    t[k / 4][k % 4] = plat_random(10) == 0 ? 4 : 2; popAt[k / 4][k % 4] = now;
+  struct Seg { float curve, y; };                       // y = height at the far edge
+  struct Car { float z, x, speed; float prevRel; uint16_t col; };
+  struct Proj { float x1, y1, w1, s1, x2, y2, w2, s2, clip; };
+
+  Seg* segs = nullptr; int nSeg = 0; float trackLen = 0;
+  Proj* proj = nullptr;
+  Car cars[N_CARS];
+  uint16_t sky[SH];
+
+  float position, speed, playerX, dist, timeLeft, skyOff, nextCp, steerVis;
+  int nitros, cpCount, overtakes, cpBonusShown;
+  uint32_t startAt, boostUntil, crashAt, cpAt, overAt2;
+  bool started;
+
+  const char* saveKey() override { return "turbo"; }
+
+  // ---------------- track ----------------
+  float lastY() { return nSeg ? segs[nSeg - 1].y : 0; }
+  void addSeg(float curve, float y) { if (nSeg < MAXSEG) { segs[nSeg].curve = curve; segs[nSeg].y = y; nSeg++; } }
+  static float easeIn(float a, float b, float p) { return a + (b - a) * p * p; }
+  static float easeInOut(float a, float b, float p) { return a + (b - a) * (-cosf(p * 3.14159265f) / 2 + 0.5f); }
+  void addRoad(int enter, int hold, int leave, float curve, float hill) {
+    float y0 = lastY(), y1 = y0 + hill * SEG_LEN; int total = enter + hold + leave;
+    for (int n = 0; n < enter; n++) addSeg(easeIn(0, curve, (float)n / enter), easeInOut(y0, y1, (float)n / total));
+    for (int n = 0; n < hold; n++)  addSeg(curve, easeInOut(y0, y1, (float)(enter + n) / total));
+    for (int n = 0; n < leave; n++) addSeg(easeInOut(curve, 0, (float)n / leave), easeInOut(y0, y1, (float)(enter + hold + n) / total));
   }
+  void buildTrack() {
+    nSeg = 0;
+    const int S = 25, M = 50, L = 100;
+    addRoad(M, M, M, 0, 0);                 // start straight
+    addRoad(S, S, S, 0, 20); addRoad(S, S, S, 0, -20);   // little bumps
+    addRoad(M, M, M, 3, 30);                // right, uphill
+    addRoad(M, M, M, 0, -30);
+    addRoad(S, M, S, -4, 0);                // S-bends
+    addRoad(S, M, S, 4, 0);
+    addRoad(S, M, S, -4, 20);
+    addRoad(L, M, L, 5, 40);                // long right, big hill
+    addRoad(M, S, M, 0, -60);               // drop
+    for (int i = 0; i < 4; i++) addRoad(S, S, S, 0, (i & 1) ? -15 : 15);   // rolling hills
+    addRoad(M, L, M, -6, 0);                // hard left
+    addRoad(M, M, M, 2, 25);
+    addRoad(S, M, S, -3, -25);
+    addRoad(M, M, M, 5, 0);
+    addRoad(S, S, S, -5, 0);
+    addRoad(L, M, L, 0, 0);
+    // back down to height 0 so the loop joins smoothly
+    float h = lastY() / SEG_LEN;
+    addRoad(M, M, M, -2, -h);
+    trackLen = (float)nSeg * SEG_LEN;
+  }
+  Seg& segAt(float z) { int i = (int)floorf(z / SEG_LEN) % nSeg; if (i < 0) i += nSeg; return segs[i]; }
+  float segY1(int i) { return segs[(i + nSeg - 1) % nSeg].y; }   // height at the near edge
+  float wrapZ(float z) { while (z >= trackLen) z -= trackLen; while (z < 0) z += trackLen; return z; }
+
+  // ---------------- setup ----------------
   void begin() override {
-    loadBest(); score = 0; phase = PLAY; won = keepGoing = false;
-    memset(t, 0, sizeof(t)); memset(popAt, 0, sizeof(popAt));
-    addTile(0); addTile(0);
-  }
-  // slide one line of 4 toward index 0
-  bool slideLine(uint16_t* v[4], uint32_t now, int idx[4][2]) {
-    uint16_t out[4] = {0, 0, 0, 0}; int n = 0; bool moved = false, merged = false;
-    int last = -1;
-    for (int i = 0; i < 4; i++) {
-      if (!*v[i]) continue;
-      if (last >= 0 && out[last] == *v[i] && !merged) { out[last] *= 2; score += out[last]; merged = true; popAt[idx[last][0]][idx[last][1]] = now; if (out[last] == 2048) won = true; }
-      else { out[n] = *v[i]; last = n; n++; merged = false; }
+    if (!segs) segs = (Seg*)plat_bigAlloc(MAXSEG * sizeof(Seg));
+    if (!proj) proj = (Proj*)plat_bigAlloc(DRAW * sizeof(Proj));
+    if (!segs || !proj) return;
+    if (nSeg == 0) buildTrack();
+    for (int y = 0; y < SH; y++) {           // sunset sky
+      float t = clamp01(y / 128.0f);
+      uint16_t top = rgb(28, 16, 64), mid = rgb(150, 44, 110), low = rgb(252, 140, 70);
+      sky[y] = t < 0.6f ? blend(top, mid, t / 0.6f) : blend(mid, low, (t - 0.6f) / 0.4f);
     }
-    for (int i = 0; i < 4; i++) { if (*v[i] != out[i]) moved = true; *v[i] = out[i]; }
-    return moved;
-  }
-  bool move(int dir, uint32_t now) {   // 0 left 1 right 2 up 3 down
-    bool moved = false;
-    for (int line = 0; line < 4; line++) {
-      uint16_t* v[4]; int idx[4][2];
-      for (int i = 0; i < 4; i++) {
-        int r, c;
-        if (dir == 0) { r = line; c = i; } else if (dir == 1) { r = line; c = 3 - i; }
-        else if (dir == 2) { r = i; c = line; } else { r = 3 - i; c = line; }
-        v[i] = &t[r][c]; idx[i][0] = r; idx[i][1] = c;
-      }
-      if (slideLine(v, now, idx)) moved = true;
+    loadBest(); score = 0; phase = PLAY; started = false;
+    position = 0; speed = 0; playerX = 0; dist = 0; timeLeft = 25; skyOff = 0; steerVis = 0;
+    nitros = 2; cpCount = 0; overtakes = 0; nextCp = CP_EVERY * SEG_LEN; cpBonusShown = 0;
+    startAt = plat_millis(); boostUntil = crashAt = cpAt = overAt2 = 0;
+    static const uint16_t cols[] = {rgb(96, 165, 250), rgb(250, 204, 21), rgb(74, 222, 128), rgb(167, 139, 250),
+                                    rgb(255, 255, 255), rgb(244, 114, 182), rgb(251, 146, 60)};
+    for (int i = 0; i < N_CARS; i++) {
+      Car& c = cars[i];
+      c.z = wrapZ(PLAYER_Z + 3000 + i * 2400.0f);
+      c.x = (plat_random(3) - 1) * 0.62f;
+      c.speed = MAX_SPEED * (0.28f + plat_random(30) / 100.0f);
+      c.col = cols[i % 7];
+      c.prevRel = 1;
     }
-    return moved;
   }
-  bool canMove() {
-    for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) {
-      if (!t[r][c]) return true;
-      if (c < 3 && t[r][c] == t[r][c + 1]) return true;
-      if (r < 3 && t[r][c] == t[r + 1][c]) return true;
-    }
-    return false;
-  }
-  bool update(Input& in, uint32_t now, uint32_t) override {
-    if (won && !keepGoing && phase == PLAY) {
-      if (in.pressed[B_A]) keepGoing = true;
-      else if (in.pressed[B_B]) { gameOver(now); }
-      return true;
-    }
+
+  // ---------------- update ----------------
+  bool update(Input& in, uint32_t now, uint32_t dt) override {
     int m = handleMeta(in, now);
     if (m == 2) return false;
     if (m == 1) { begin(); return true; }
-    if (phase != PLAY) return true;
-    int dir = in.pressed[B_LEFT] ? 0 : in.pressed[B_RIGHT] ? 1 : in.pressed[B_UP] ? 2 : in.pressed[B_DOWN] ? 3 : -1;
-    if (dir >= 0 && move(dir, now)) { addTile(now); if (!canMove()) gameOver(now); }
+    if (phase != PLAY || !segs) return true;
+    float t = dt / 1000.0f;
+    if (!started) { if (now - startAt >= 2400) started = true; else return true; }   // 3-2-1-GO
+
+    bool boost = now < boostUntil;
+    if ((in.pressed[B_UP]) && nitros > 0 && !boost) { nitros--; boostUntil = now + 2200; boost = true; }
+    float maxS = boost ? MAX_SPEED * 1.35f : MAX_SPEED;
+    float pct = speed / MAX_SPEED;
+
+    // steering + the curve pushing the car outwards
+    Seg& ps = segAt(position + PLAYER_Z);
+    float dx = t * 2.0f * fminf(pct, 1.0f);
+    float steer = 0;
+    if (in.held[B_LEFT]) steer -= 1;
+    if (in.held[B_RIGHT]) steer += 1;
+    playerX += steer * dx;
+    playerX -= dx * pct * ps.curve * CENTRIFUGAL;
+    steerVis = lerpf(steerVis, steer, fminf(1, t * 10));
+
+    // speed
+    if (in.held[B_DOWN]) speed -= MAX_SPEED * 1.1f * t;            // brake
+    else speed += (boost ? MAX_SPEED * 0.9f : MAX_SPEED / 4.5f) * t; // automatic gas
+    speed -= speed * 0.04f * t;                                       // drag
+    bool offRoad = playerX < -1 || playerX > 1;
+    if (offRoad && speed > MAX_SPEED / 4) speed -= MAX_SPEED * 0.9f * t;
+    if (speed > maxS) speed = fmaxf(maxS, speed - MAX_SPEED * 0.6f * t);
+    if (speed < 0) speed = 0;
+    if (playerX < -2.3f) playerX = -2.3f;
+    if (playerX > 2.3f) playerX = 2.3f;
+
+    position = wrapZ(position + speed * t);
+    dist += speed * t;
+    skyOff += ps.curve * pct * t * 30;
+
+    // traffic
+    float pz = position + PLAYER_Z;
+    for (int i = 0; i < N_CARS; i++) {
+      Car& c = cars[i];
+      c.z = wrapZ(c.z + c.speed * t);
+      float rel = c.z - wrapZ(pz);
+      if (rel > trackLen / 2) rel -= trackLen;
+      if (rel < -trackLen / 2) rel += trackLen;
+      if (fabsf(rel) < 160 && fabsf(c.x - playerX) < 0.5f && speed > c.speed) {   // crash
+        speed = c.speed * 0.45f;
+        position = wrapZ(c.z - PLAYER_Z - 170);
+        crashAt = now; rel = 170;
+        boostUntil = 0;
+      }
+      if (c.prevRel > 0 && rel <= 0 && rel > -2000) { overtakes++; }
+      c.prevRel = rel;
+      // respawn cars that fall far behind, ahead of the player
+      if (rel < -3000) { c.z = wrapZ(pz + DRAW * SEG_LEN * 0.9f + plat_random(4000)); c.x = (plat_random(3) - 1) * 0.62f; c.prevRel = 1; }
+    }
+
+    // checkpoints + timer
+    if (dist >= nextCp) {
+      float bonus = fmaxf(6, 11 - cpCount / 2);
+      timeLeft += bonus; cpBonusShown = (int)bonus;
+      cpCount++; nextCp += CP_EVERY * SEG_LEN; cpAt = now;
+      if (nitros < 3) nitros++;
+    }
+    timeLeft -= t;
+    score = (int)(dist / SEG_LEN / 4) + overtakes * 25;
+    if (timeLeft <= 0) { timeLeft = 0; gameOver(now); }
     return true;
   }
-  static uint16_t tileColor(int v) {
-    switch (v) {
-      case 2: return rgb(236, 236, 236); case 4: return rgb(200, 200, 205);
-      case 8: return rgb(253, 186, 116); case 16: return C_ORANGE;
-      case 32: return C_RED; case 64: return rgb(239, 68, 68);
-      case 128: return rgb(253, 230, 138); case 256: return C_YELLOW;
-      case 512: return rgb(163, 230, 53); case 1024: return rgb(34, 211, 238);
-      case 2048: return C_PURPLE; default: return C_PINK;
+
+  // ---------------- drawing ----------------
+  static void hline(Canvas& g, int x0, int x1, int y, uint16_t c) {
+    if (x0 < 0) x0 = 0;
+    if (x1 > SW) x1 = SW;
+    if (x1 > x0) g.drawFastHLine(x0, y, x1 - x0, c);
+  }
+  // clipped filled box, bottom-clipped at "clip" (hills in front hide sprites)
+  static void box(Canvas& g, float x, float y, float w, float h, float clip, uint16_t c) {
+    int x0 = ir(x), y0 = ir(y), x1 = ir(x + w), y1 = ir(y + h);
+    if (y1 > clip) y1 = (int)clip;
+    if (x0 < 0) x0 = 0;
+    if (x1 > SW) x1 = SW;
+    if (y0 < 0) y0 = 0;
+    if (x1 > x0 && y1 > y0) g.fillRect(x0, y0, x1 - x0, y1 - y0, c);
+  }
+  void drawSegment(Canvas& g, const Proj& p, int idx, float maxy) {
+    bool light = (idx / RUMBLE) % 2;
+    bool start = idx >= 4 && idx < 6;
+    uint16_t grass = light ? rgb(22, 92, 70) : rgb(16, 76, 60);
+    uint16_t rumble = light ? rgb(240, 240, 240) : rgb(220, 50, 60);
+    uint16_t road = light ? rgb(70, 70, 82) : rgb(64, 64, 76);
+    int top = (int)ceilf(p.y2), bot = (int)fminf(ceilf(p.y1), maxy);
+    if (top < 0) top = 0;
+    for (int y = top; y < bot; y++) {
+      float k = (p.y1 - y) / (p.y1 - p.y2);
+      float cx = p.x1 + (p.x2 - p.x1) * k, w = p.w1 + (p.w2 - p.w1) * k;
+      float r = w / 7;
+      hline(g, 0, SW, y, grass);
+      hline(g, ir(cx - w - r), ir(cx - w), y, rumble);
+      hline(g, ir(cx + w), ir(cx + w + r), y, rumble);
+      if (start) {                                   // chequered start line
+        int cells = 8;
+        for (int c = 0; c < cells; c++)
+          hline(g, ir(cx - w + 2 * w * c / cells), ir(cx - w + 2 * w * (c + 1) / cells), y,
+                ((c + (idx & 1)) & 1) ? C_WHITE : rgb(20, 20, 24));
+      } else {
+        hline(g, ir(cx - w), ir(cx + w), y, road);
+        if (light) {
+          float lw = fmaxf(1, w / 36);
+          for (int l = 1; l < 3; l++) { float lx = cx - w + 2 * w * l / 3; hline(g, ir(lx - lw / 2), ir(lx + lw / 2) + 1, y, rgb(230, 230, 230)); }
+        }
+      }
     }
   }
+  // rear view of a car. x = centre, y = bottom, w = width in pixels
+  void drawCar(Canvas& g, float x, float y, float w, uint16_t col, float clip, float lean) {
+    float h = w * 0.52f, l = x - w / 2;
+    uint16_t dark = blend(col, C_BG, 0.45f);
+    box(g, l + w * 0.04f, y - h * 0.14f, w * 0.92f, h * 0.16f, clip, rgb(10, 10, 12));      // shadow / tyres
+    box(g, l + w * 0.06f, y - h * 0.22f, w * 0.16f, h * 0.22f, clip, rgb(18, 18, 20));      // wheels
+    box(g, l + w * 0.78f, y - h * 0.22f, w * 0.16f, h * 0.22f, clip, rgb(18, 18, 20));
+    box(g, l, y - h * 0.62f, w, h * 0.44f, clip, col);                                      // body
+    box(g, l + w * 0.18f + lean, y - h, w * 0.64f, h * 0.40f, clip, dark);                   // cabin
+    box(g, l + w * 0.24f + lean, y - h * 0.92f, w * 0.52f, h * 0.26f, clip, rgb(40, 60, 90)); // rear window
+    box(g, l + w * 0.05f, y - h * 0.50f, w * 0.20f, h * 0.10f, clip, rgb(255, 60, 60));      // tail lights
+    box(g, l + w * 0.75f, y - h * 0.50f, w * 0.20f, h * 0.10f, clip, rgb(255, 60, 60));
+    box(g, l + w * 0.36f, y - h * 0.36f, w * 0.28f, h * 0.10f, clip, rgb(230, 230, 230));    // plate
+  }
+  void drawPalm(Canvas& g, float x, float y, float s, float clip) {
+    float h = s * 2.6f, tw = fmaxf(1, s * 0.12f);
+    box(g, x - tw / 2, y - h, tw, h, clip, rgb(90, 60, 40));
+    uint16_t leaf = rgb(20, 120, 80);
+    for (int i = -2; i <= 2; i++) box(g, x + i * s * 0.28f - s * 0.25f, y - h - s * 0.12f + abs(i) * s * 0.1f, s * 0.5f, fmaxf(1, s * 0.14f), clip, leaf);
+  }
+  void drawSky(Canvas& g, uint32_t now) {
+    for (int y = 0; y < 132; y++) g.drawFastHLine(0, y, SW, sky[y]);
+    // retro striped sun
+    int sx = 160 - ((int)(skyOff * 0.4f) % 640 + 640) % 640 + 320; if (sx > 480) sx -= 640;
+    for (int dy = -30; dy <= 30; dy++) {
+      int yy = 98 + dy;
+      if (dy > 4 && ((dy / 4) % 2)) continue;
+      int hw = (int)sqrtf(900 - dy * dy);
+      uint16_t c = blend(rgb(255, 230, 90), rgb(255, 90, 120), (dy + 30) / 60.0f);
+      hline(g, sx - hw, sx + hw + 1, yy, c);
+    }
+    // two layers of mountains (parallax)
+    for (int x = 0; x < SW; x += 2) {
+      float fx = x + skyOff * 0.8f;
+      int h1 = 22 + (int)(12 * sinf(fx * 0.011f) + 8 * sinf(fx * 0.027f + 1) + 4 * sinf(fx * 0.061f + 2));
+      g.fillRect(x, 124 - h1, 2, h1, rgb(70, 30, 90));
+      float fx2 = x + skyOff * 1.6f;
+      int h2 = 10 + (int)(7 * sinf(fx2 * 0.019f + 3) + 5 * sinf(fx2 * 0.043f));
+      g.fillRect(x, 124 - h2, 2, h2, rgb(40, 20, 60));
+    }
+    g.fillRect(0, 124, SW, SH - 124, rgb(16, 76, 60));
+  }
   void draw(Canvas& g, uint32_t now) override {
-    g.fillScreen(C_BG);
-    drawHud(g, "2048", C_PINK);
-    rrect(g, GX - 2, GY - 2, 4 * TS + 5 * GAPP + 4 - 2, 4 * TS + 5 * GAPP + 4 - 2, 10, C_CARD);
-    for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) {
-      int x = GX + GAPP + c * (TS + GAPP), y = GY + GAPP + r * (TS + GAPP);
-      int v = t[r][c];
-      if (!v) { rrect(g, x, y, TS, TS, 8, rgb(30, 30, 34)); continue; }
-      float p = popAt[r][c] ? easeOutBack(seg(now, popAt[r][c], popAt[r][c] + 160)) : 1;
-      float sz = TS * (0.6f + 0.4f * p);
-      rrect(g, x + (TS - sz) / 2, y + (TS - sz) / 2, sz, sz, 8, tileColor(v));
-      char buf[8]; snprintf(buf, sizeof(buf), "%d", v);
-      uint16_t tc = v <= 4 ? rgb(40, 40, 44) : C_BG;
-      textC(g, v >= 1000 ? F_SMALL : (v >= 100 ? F_BOLD : F_BIG), x + TS / 2, y + TS / 2 + (v >= 1000 ? -3 : (v >= 100 ? 6 : 8)), buf, tc);
+    if (!segs || !proj) { g.fillScreen(C_BG); textC(g, F_BOLD, 160, 120, "Not enough memory", C_RED); return; }
+    int shake = (crashAt && now - crashAt < 300) ? (int)(plat_random(7)) - 3 : 0;
+    drawSky(g, now);
+
+    // ---- road, front to back ----
+    int base = (int)floorf(position / SEG_LEN) % nSeg;
+    float basePct = fmodf(position, SEG_LEN) / SEG_LEN;
+    float pz = position + PLAYER_Z;
+    int pSeg = (int)floorf(pz / SEG_LEN) % nSeg;
+    float pPct = fmodf(pz, SEG_LEN) / SEG_LEN;
+    float playerY = lerpf(segY1(pSeg), segs[pSeg].y, pPct);
+    float camY = playerY + CAM_H, camX = playerX * ROAD_W;
+    float x = 0, dx = -(segs[base].curve * basePct);
+    float maxy = SH;
+    for (int n = 0; n < DRAW; n++) {
+      int i = (base + n) % nSeg;
+      bool looped = i < base;
+      float camZ = position - (looped ? trackLen : 0);
+      float z1 = (float)i * SEG_LEN - camZ, z2 = z1 + SEG_LEN;
+      Proj& p = proj[n];
+      p.clip = maxy;
+      p.s1 = DEPTH / fmaxf(z1, 1); p.s2 = DEPTH / fmaxf(z2, 1);
+      p.x1 = SW / 2 + p.s1 * (-(camX - x)) * SW / 2 + shake;
+      p.x2 = SW / 2 + p.s2 * (-(camX - x - dx)) * SW / 2 + shake;
+      p.y1 = SH / 2 - p.s1 * (segY1(i) - camY) * SH / 2;
+      p.y2 = SH / 2 - p.s2 * (segs[i].y - camY) * SH / 2;
+      p.w1 = p.s1 * ROAD_W * SW / 2; p.w2 = p.s2 * ROAD_W * SW / 2;
+      x += dx; dx += segs[i].curve;
+      if (z1 <= DEPTH || p.y2 >= p.y1 || p.y2 >= maxy) { p.s1 = 0; continue; }
+      drawSegment(g, p, i, maxy);
+      maxy = p.y2;
     }
-    textC(g, F_SMALL, 272, 90, "ARROWS", C_DIM);
-    textC(g, F_SMALL, 272, 102, "or D X Z C", C_DIM);
-    textC(g, F_SMALL, 272, 114, "to slide", C_DIM);
-    textC(g, F_SMALL, 272, 150, "ESC pause", C_DIM);
-    if (won && !keepGoing && phase == PLAY) {
-      dimScreen(g);
-      rrect(g, SW / 2 - 90, 75, 180, 90, 14, C_CARD);
-      textC(g, F_BIG, SW / 2, 111, "2048!", C_PURPLE);
-      textC(g, F_SMALL, SW / 2, 131, "ENTER keep going", C_SOFT);
-      textC(g, F_SMALL, SW / 2, 145, "ESC   finish", C_SOFT);
+
+    // ---- sprites, back to front ----
+    int cpSeg = (int)floorf(wrapZ(nextCp - dist + pz) / SEG_LEN) % nSeg;   // next checkpoint
+    for (int n = DRAW - 1; n > 0; n--) {
+      Proj& p = proj[n];
+      if (p.s1 <= 0) continue;
+      int i = (base + n) % nSeg;
+      float sc = p.w1 / ROAD_W;                                   // pixels per world unit
+      if (i % 8 == 0) {                                          // palms along both sides
+        float s = sc * 900;
+        drawPalm(g, p.x1 - p.w1 * 1.45f, p.y1, s, p.clip);
+        drawPalm(g, p.x1 + p.w1 * 1.45f, p.y1, s, p.clip);
+      }
+      if (i == cpSeg) {                                          // checkpoint arch
+        float ph = sc * 2300, pw = fmaxf(2, sc * 180);
+        uint16_t ac = rgb(250, 204, 21);
+        box(g, p.x1 - p.w1 * 1.2f - pw / 2, p.y1 - ph, pw, ph, p.clip, ac);
+        box(g, p.x1 + p.w1 * 1.2f - pw / 2, p.y1 - ph, pw, ph, p.clip, ac);
+        float bh = sc * 420;
+        box(g, p.x1 - p.w1 * 1.2f, p.y1 - ph, p.w1 * 2.4f, bh, p.clip, rgb(30, 30, 36));
+        if (bh > 12 && p.y1 - ph + bh < p.clip) textC(g, F_SMALL, ir(p.x1), ir(p.y1 - ph + bh / 2 - 3), "CHECKPOINT", ac);
+      }
+      for (int c = 0; c < N_CARS; c++) {
+        int ci = (int)floorf(cars[c].z / SEG_LEN) % nSeg;
+        if (ci != i) continue;
+        float pc = fmodf(cars[c].z, SEG_LEN) / SEG_LEN;
+        float cx = lerpf(p.x1, p.x2, pc), cy = lerpf(p.y1, p.y2, pc), w = lerpf(p.w1, p.w2, pc);
+        float ww = w / ROAD_W * CAR_W;
+        cx += cars[c].x * w;
+        if (ww > 2) drawCar(g, cx, cy, ww, cars[c].col, p.clip, 0);
+      }
     }
-    drawOverlays(g, now, C_PINK);
+
+    // ---- player car ----
+    bool boost = now < boostUntil;
+    bool crashFlash = crashAt && now - crashAt < 600 && (now / 80) % 2;
+    float bounce = (playerX < -1 || playerX > 1) && speed > 500 ? (float)plat_random(3) : 0;
+    float py = 226 - bounce;
+    if (boost) {                                                // exhaust flames
+      int fl = 6 + plat_random(6);
+      g.fillTriangle(136, ir(py - 10), 146, ir(py - 10), 141, ir(py - 10 + fl), rgb(255, 170, 40));
+      g.fillTriangle(174, ir(py - 10), 184, ir(py - 10), 179, ir(py - 10 + fl), rgb(255, 170, 40));
+    }
+    if (!crashFlash) drawCar(g, 160 + shake, py, 92, rgb(230, 50, 60), SH, steerVis * 3);
+
+    drawRaceHud(g, now);
+    drawOverlays(g, now, C_ORANGE);
+  }
+  void drawRaceHud(Canvas& g, uint32_t now) {
+    char b[24];
+    // time (top centre)
+    bool low = timeLeft < 5 && started;
+    rrect(g, 128, 4, 64, 34, 10, blend(C_BG, sky[10], 0.3f));
+    textC(g, F_SMALL, 160, 8, "TIME", low ? C_RED : C_SOFT);
+    snprintf(b, sizeof(b), "%d", (int)ceilf(timeLeft));
+    textC(g, F_BIG, 160, 34, b, low && (now / 250) % 2 ? C_RED : C_WHITE);
+    // score (top left), best under it
+    snprintf(b, sizeof(b), "%d", score);
+    text(g, F_BOLD, 8, 20, b, C_WHITE);
+    snprintf(b, sizeof(b), "BEST %d", imax(best, score));
+    text(g, F_SMALL, 8, 26, b, C_SOFT);
+    // speed (top right)
+    int kmh = (int)(speed / MAX_SPEED * 240);
+    snprintf(b, sizeof(b), "%d", kmh);
+    textR(g, F_BOLD, SW - 34, 20, b, C_WHITE);
+    text(g, F_SMALL, SW - 30, 12, "KM/H", C_SOFT);
+    // nitro pips (under speed)
+    text(g, F_SMALL, SW - 78, 26, "NITRO", C_SOFT);
+    for (int i = 0; i < 3; i++) rrect(g, SW - 44 + i * 12, 26, 9, 7, 2, i < nitros ? C_TEAL : blend(C_BG, C_LINE, 0.8f));
+    // countdown / messages
+    uint32_t since = now - startAt;
+    if (!started) {
+      int k = 3 - (int)(since / 800);
+      snprintf(b, sizeof(b), "%d", k < 1 ? 1 : k);
+      float pop = 1 - seg(since % 800, 0, 250);
+      textC(g, F_HUGE, 160, 104 - ir(pop * 6), b, C_YELLOW);
+      rrect(g, 64, 116, 192, 20, 10, rgb(20, 12, 36));
+      textC(g, F_SMALL, 160, 123, "Z C STEER   X BRAKE   D NITRO", C_WHITE);
+    } else if (since < 3000) textC(g, F_HUGE, 160, 104, "GO!", C_GREEN);
+    if (cpAt && now - cpAt < 1500) {
+      snprintf(b, sizeof(b), "CHECKPOINT  +%ds", cpBonusShown);
+      textC(g, F_BOLD, 160, 72, b, C_YELLOW);
+    }
+    if (crashAt && now - crashAt < 800) textC(g, F_BOLD, 160, 94, "CRASH!", C_RED);
   }
 };
 
-#define OS_VERSION "v1.4"
+#define OS_VERSION "v1.5"
 
 enum MenuKind : uint8_t { MK_AI, MK_GAME, MK_SETTINGS };
 struct MenuItem { const char* name; const char* key; uint16_t color; Icon icon; MenuKind kind; };
@@ -1856,7 +2124,7 @@ static const MenuItem MENU[] = {
   {"Pong",     "pong",     C_BLUE,   IC_PONG,     MK_GAME},
   {"Breakout", "breakout", C_ORANGE, IC_BREAKOUT, MK_GAME},
   {"Flappy",   "flappy",   C_YELLOW, IC_FLAPPY,   MK_GAME},
-  {"2048",     "2048",     C_PINK,   IC_2048,     MK_GAME},
+  {"Turbo",    "turbo",    C_PINK,   IC_RACE,     MK_GAME},
   {"Settings", nullptr,    C_SOFT,   IC_SETTINGS, MK_SETTINGS},
 };
 static const int N_MENU = sizeof(MENU) / sizeof(MENU[0]);
@@ -1905,8 +2173,12 @@ static void drawIcon(Canvas& g, Icon ic, int x, int y, uint16_t col) {
     case IC_FLAPPY:
       g.fillCircle(cx - 1, cy, 7, k); g.fillCircle(cx + 1, cy - 2, 2, col);
       g.fillTriangle(cx + 6, cy, cx + 11, cy + 2, cx + 6, cy + 4, k); break;
-    case IC_2048:
-      text(g, F_SMALL, x + 5, y + 13, "2048", k); break;
+    case IC_RACE:                        // road in perspective + car from behind
+      g.fillTriangle(cx - 3, y + 5, cx + 3, y + 5, x + 30, y + 30, k);
+      g.fillTriangle(cx - 3, y + 5, x + 4, y + 30, x + 30, y + 30, k);
+      g.fillRect(cx - 1, y + 9, 2, 3, col); g.fillRect(cx - 1, y + 15, 2, 3, col);
+      g.fillRect(cx - 8, y + 21, 16, 6, col); g.fillRect(cx - 5, y + 18, 10, 4, col);
+      g.fillRect(cx - 7, y + 23, 3, 2, k); g.fillRect(cx + 4, y + 23, 3, 2, k); break;
     case IC_SETTINGS:
       for (int i = 0; i < 8; i++) {
         float a = i * 3.14159f / 4;
@@ -1941,7 +2213,7 @@ struct App {
   static const uint32_t BOOT_LEN = 4150;
   char toast[80] = ""; uint32_t toastAt = 0;
 
-  SnakeGame snake; BlocksGame blocks; PongGame pong; BreakoutGame breakout; FlappyGame flappy; Game2048 g2048;
+  SnakeGame snake; BlocksGame blocks; PongGame pong; BreakoutGame breakout; FlappyGame flappy; RacerGame racer;
   Chat chat;
 
   // ---- saved WiFi networks ----
@@ -1979,7 +2251,7 @@ struct App {
 
   void begin() {
     games[0] = &snake; games[1] = &blocks; games[2] = &pong;
-    games[3] = &breakout; games[4] = &flappy; games[5] = &g2048;
+    games[3] = &breakout; games[4] = &flappy; games[5] = &racer;
     showFps = plat_loadInt("fps", 0);
     flip = plat_loadInt("flip2", 0);
     aiPro = plat_loadInt("aipro", 0);
