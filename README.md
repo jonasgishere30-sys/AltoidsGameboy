@@ -28,7 +28,7 @@ running on a 700mAh LiPo.
 ## Controls
 | Key | Action |
 |---|---|
-| Arrows or W A S D | Move / navigate |
+| **D** up · **X** down · **Z** left · **C** right | Move / navigate (arrow keys also work) |
 | SPACE or ENTER | Select / action |
 | ESC or BACKSPACE | Back / pause |
 | P | Pause |

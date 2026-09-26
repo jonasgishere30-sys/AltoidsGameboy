@@ -1,4 +1,4 @@
-// Altoids Gameboy - Arcade OS v1.2 (landscape) - SINGLE FILE
+// Altoids Gameboy - Arcade OS v1.3 (landscape) - SINGLE FILE
 // Paste this whole file into any sketch (any folder name). No other files needed.
 // Boot animation, menu and 6 built-in games, controlled with the CardKB2 over BLE.
 //
@@ -10,7 +10,7 @@
 // Keyboard: M5Stack Unit CardKB2 in BLE HID mode (Fn + Sym + 4)
 // Libraries: "Adafruit ST7735 and ST7789 Library" (+ Adafruit GFX), "NimBLE-Arduino" 2.x
 //
-// Controls: Arrows or W A S D = move,  SPACE / ENTER = select / action,
+// Controls: D = up, X = down, Z = left, C = right (arrow keys also work),  SPACE / ENTER = select / action,
 //           ESC / BACKSPACE = back / pause,  P = pause
 
 #include <SPI.h>
@@ -185,7 +185,8 @@ static void drawSparkle(Canvas& g, float x, float y, float r, uint16_t c) {
 }
 
 // Turns CardKB2 HID key reports into game buttons.
-// Arrows or WASD = direction, SPACE/ENTER = A, ESC/BACKSPACE = B, P = pause
+// Arrows or D/X/C/Z = direction (D up, X down, Z left, C right),
+// SPACE/ENTER = A, ESC/BACKSPACE = B, P = pause
 #include <stdint.h>
 #include <string.h>
 
@@ -204,10 +205,10 @@ struct Input {
 
   static int map(uint8_t kc) {
     switch (kc) {
-      case 0x52: case 0x1A: return B_UP;      // Up arrow, W
-      case 0x51: case 0x16: return B_DOWN;    // Down arrow, S
-      case 0x50: case 0x04: return B_LEFT;    // Left arrow, A
-      case 0x4F: case 0x07: return B_RIGHT;   // Right arrow, D
+      case 0x52: case 0x07: return B_UP;      // Up arrow, D
+      case 0x51: case 0x1B: return B_DOWN;    // Down arrow, X
+      case 0x50: case 0x1D: return B_LEFT;    // Left arrow, Z
+      case 0x4F: case 0x06: return B_RIGHT;   // Right arrow, C
       case 0x2C: case 0x28: return B_A;       // Space, Enter
       case 0x29: case 0x2A: return B_B;       // Esc, Backspace
       case 0x13:            return B_PAUSE;   // P
@@ -913,7 +914,7 @@ struct Game2048 : Game {
       textC(g, v >= 1000 ? F_SMALL : (v >= 100 ? F_BOLD : F_BIG), x + TS / 2, y + TS / 2 + (v >= 1000 ? -3 : (v >= 100 ? 6 : 8)), buf, tc);
     }
     textC(g, F_SMALL, 272, 90, "ARROWS", C_DIM);
-    textC(g, F_SMALL, 272, 102, "or WASD", C_DIM);
+    textC(g, F_SMALL, 272, 102, "or D X Z C", C_DIM);
     textC(g, F_SMALL, 272, 114, "to slide", C_DIM);
     textC(g, F_SMALL, 272, 150, "ESC pause", C_DIM);
     if (won && !keepGoing && phase == PLAY) {
@@ -1236,7 +1237,7 @@ struct App {
     char left[32];
     if (sel < N_GAMES) { if (bests[sel]) snprintf(left, sizeof(left), "%s   BEST %d", MENU[sel].name, bests[sel]); else snprintf(left, sizeof(left), "%s   NEW", MENU[sel].name); }
     else snprintf(left, sizeof(left), "%s", MENU[sel].name);
-    drawFooter(g, left, "ARROWS move   ENTER open");
+    drawFooter(g, left, "DXZC move   ENTER open");
   }
   void drawLaunch(Canvas& g, uint32_t t, uint32_t now) {
     drawMenu(g, now, true);
@@ -1286,7 +1287,7 @@ struct App {
     m.look = sinf(now * 0.0015f);
     drawMascot(g, m);
     textC(g, F_BOLD, 218, 72, "Altoids Gameboy", C_WHITE);
-    textC(g, F_SMALL, 218, 82, "ARCADE OS  v1.2", C_TEAL);
+    textC(g, F_SMALL, 218, 82, "ARCADE OS  v1.3", C_TEAL);
     const char* lines[] = {"ESP32-S3 N16R8", "ST7789 320x240 display", "CardKB2 over Bluetooth LE", "700mAh LiPo + MT3608 5V"};
     for (int i = 0; i < 4; i++) textC(g, F_SMALL, 218, 106 + i * 16, lines[i], C_SOFT);
     drawFooter(g, "", "ESC back");
