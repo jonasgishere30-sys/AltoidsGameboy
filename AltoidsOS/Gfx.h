@@ -10,9 +10,8 @@
 typedef GFXcanvas16 Canvas;
 static const int SW = 320, SH = 240;
 
-static constexpr uint16_t rgb(uint8_t r, uint8_t g, uint8_t b) {
-  return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
-}
+// RGB888 -> RGB565 (a macro so it works before any function is defined)
+#define rgb(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
 // Palette: black & white with one teal accent + a colour per game
 static const uint16_t C_BG     = rgb(0, 0, 0);
 static const uint16_t C_CARD   = rgb(20, 20, 22);
@@ -28,6 +27,25 @@ static const uint16_t C_YELLOW = rgb(250, 204, 21);
 static const uint16_t C_PINK   = rgb(244, 114, 182);
 static const uint16_t C_RED    = rgb(248, 113, 113);
 static const uint16_t C_BLUE   = rgb(96, 165, 250);
+
+// ---- Types used by the drawing functions (kept above every function so the
+//      sketch also compiles as one single .ino file) ----
+enum Font { F_SMALL, F_REG, F_BOLD, F_BIG, F_HUGE };
+enum Icon { IC_SNAKE, IC_BLOCKS, IC_PONG, IC_BREAKOUT, IC_FLAPPY, IC_2048, IC_SETTINGS, IC_ABOUT };
+struct Mascot {
+  float cx = 120, cy = 130, s = 0.5f;  // centre of the screen box at rest
+  float look = 0;       // -1 left .. 1 right
+  float lookY = 0;      // -1 up .. 1 down
+  float eyeOpen = 1;    // 1 open, 0 closed (blink)
+  float eyeScale = 1;   // 0 = no eyes (pop-in)
+  float happy = 0;      // 1 = eyes squint into little arcs
+  float squash = 0;     // + wide/short, - tall/thin
+  float lift = 0;       // pixels the box floats above its resting spot
+  float dropY = 0;      // extra offset for drop-in
+  float barW = 1;       // 0..1 width of the bar
+  bool  showBar = true;
+  uint16_t body = C_WHITE, eye = C_TEAL, bg = C_BG;
+};
 
 static inline float clamp01(float t) { return t < 0 ? 0 : (t > 1 ? 1 : t); }
 static inline float lerpf(float a, float b, float t) { return a + (b - a) * t; }
@@ -64,7 +82,6 @@ static void dimScreen(Canvas& g) {
 }
 
 // ---- Text ----
-enum Font { F_SMALL, F_REG, F_BOLD, F_BIG, F_HUGE };
 static void setFont(Canvas& g, Font f) {
   switch (f) {
     case F_SMALL: g.setFont(nullptr); g.setTextSize(1); break;
@@ -99,20 +116,6 @@ static void textR(Canvas& g, Font f, int rx, int y, const char* s, uint16_t c) {
 
 // ---- Mascot: rounded screen with two pill eyes, sitting on a bar ----
 // Proportions measured from the reference image (units at s = 1).
-struct Mascot {
-  float cx = 120, cy = 130, s = 0.5f;  // centre of the screen box at rest
-  float look = 0;       // -1 left .. 1 right
-  float lookY = 0;      // -1 up .. 1 down
-  float eyeOpen = 1;    // 1 open, 0 closed (blink)
-  float eyeScale = 1;   // 0 = no eyes (pop-in)
-  float happy = 0;      // 1 = eyes squint into little arcs
-  float squash = 0;     // + wide/short, - tall/thin
-  float lift = 0;       // pixels the box floats above its resting spot
-  float dropY = 0;      // extra offset for drop-in
-  float barW = 1;       // 0..1 width of the bar
-  bool  showBar = true;
-  uint16_t body = C_WHITE, eye = C_TEAL, bg = C_BG;
-};
 
 static void drawMascot(Canvas& g, const Mascot& m) {
   const float s = m.s;

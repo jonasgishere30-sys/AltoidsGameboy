@@ -10,7 +10,6 @@
 #include "GameFlappy.h"
 #include "Game2048.h"
 
-enum Icon { IC_SNAKE, IC_BLOCKS, IC_PONG, IC_BREAKOUT, IC_FLAPPY, IC_2048, IC_SETTINGS, IC_ABOUT };
 struct MenuItem { const char* name; const char* key; uint16_t color; Icon icon; };
 static const MenuItem MENU[] = {
   {"Snake",    "snake",    C_GREEN,  IC_SNAKE},
