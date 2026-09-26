@@ -7,10 +7,12 @@ running on a 700mAh LiPo.
 
 ![preview](docs/images/preview.png)
 
+![Ask AI and WiFi](docs/images/ai-wifi.png)
+
 ## Repo layout
 | Folder | What's in it |
 |---|---|
-| `firmware/AltoidsOS_OneFile/` | **The main program** (Arcade OS). One file: boot animation, menu, 6 games, settings. |
+| `firmware/AltoidsOS_OneFile/` | **The main program** (Arcade OS v1.4). One file: boot animation, menu, Ask AI chat, WiFi, 6 games, settings. |
 | `docs/Wiring-and-Power.md` | Full wiring + power plan (battery, TP4056, switch, MT3608, display). |
 | `docs/images/` | Wiring diagram, screenshots, startup animation. |
 | `tests/ScreenTest/` | Simple screen test (use first if the screen shows nothing). |
@@ -32,6 +34,26 @@ running on a 700mAh LiPo.
 | SPACE or ENTER | Select / action |
 | ESC or BACKSPACE | Back / pause |
 | P | Pause |
+
+**Typing (Ask AI, passwords, API keys):** letters/numbers type (use the CardKB2 Shift/Sym for capitals and symbols),
+BACKSPACE deletes, ENTER sends/saves, ESC stops an answer or goes back, arrow keys scroll,
+TAB switches to scroll mode (then D/X also scroll). Type `/new` in the chat to clear it.
+
+## Ask AI setup (Perplexity API)
+1. **Settings → WiFi → Scan for networks**, pick your network, type the password (case sensitive), ENTER.
+   Up to 5 networks are saved; the strongest saved one connects automatically at boot. 2.4 GHz WiFi only.
+2. Make an API key at [console.perplexity.ai](https://console.perplexity.ai/project/keys) (API Keys page).
+   API use is billed by Perplexity to that account.
+3. **Settings → API keys → + Add API key**: name it, then type the key (starts with `pplx-`).
+   Big letters are used so you can check every character; numbers show in teal, symbols in yellow.
+   Up to 5 keys are saved; ENTER on a key to switch to it or delete it.
+4. Open **Ask AI** from the menu and type a question. Answers stream in with their web sources.
+- **AI mode**: Fast (preset `fast`) or Pro (preset `low`, deeper research, costs more).
+- **Short answers**: asks for answers that fit the small screen.
+- **Secure connection**: verifies the API server certificate (leave ON; only turn OFF to troubleshoot).
+- Uses the Perplexity **Agent API** (`POST https://api.perplexity.ai/v1/agent`, streaming).
+- Keys and WiFi passwords are stored in the ESP32's flash (not encrypted) — don't lend the device out with your key on it.
+- Bluetooth keyboard input can lag briefly while an answer is being fetched (WiFi and Bluetooth share one radio).
 
 ## Games
 Snake · Blocks · Pong · Breakout · Flappy · 2048 — best scores are saved in flash.

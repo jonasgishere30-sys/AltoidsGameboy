@@ -1,5 +1,4 @@
-// Altoids Gameboy - Arcade OS v1.3 (landscape) - SINGLE FILE
-// Paste this whole file into any sketch (any folder name). No other files needed.
+// Altoids Gameboy - Arcade OS v1.4 (landscape) - SINGLE FILE: just open this .ino and upload
 // Boot animation, menu and 6 built-in games, controlled with the CardKB2 over BLE.
 //
 // Board:    ESP32-S3 N16R8 -> Tools: "ESP32S3 Dev Module", Flash Size 16MB,
@@ -12,14 +11,18 @@
 //
 // Controls: D = up, X = down, Z = left, C = right (arrow keys also work),  SPACE / ENTER = select / action,
 //           ESC / BACKSPACE = back / pause,  P = pause
+//           In Ask AI / text boxes letters type; arrows scroll, TAB = scroll mode, ENTER send, ESC stop / back
+// Ask AI:   Settings > WiFi (scan, pick, type password) and Settings > API keys (add a Perplexity key)
 
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
+#include <WiFi.h>
+#include <NetworkClientSecure.h>
 // ================= UI + games (all in one file) =================
-// Boot animation -> playful transition -> menu -> games / settings / about
+// Boot animation -> playful transition -> menu -> AI chat / games / settings
 // Colors, easing, text and the mascot. Everything draws into a 320x240 (landscape) canvas.
 #include <Adafruit_GFX.h>
 #include <math.h>
@@ -52,7 +55,7 @@ static const uint16_t C_BLUE   = rgb(96, 165, 250);
 // ---- Types used by the drawing functions (kept above every function so the
 //      sketch also compiles as one single .ino file) ----
 enum Font { F_SMALL, F_REG, F_BOLD, F_BIG, F_HUGE };
-enum Icon { IC_SNAKE, IC_BLOCKS, IC_PONG, IC_BREAKOUT, IC_FLAPPY, IC_2048, IC_SETTINGS, IC_ABOUT };
+enum Icon { IC_SNAKE, IC_BLOCKS, IC_PONG, IC_BREAKOUT, IC_FLAPPY, IC_2048, IC_SETTINGS, IC_ABOUT, IC_AI };
 struct Mascot {
   float cx = 120, cy = 130, s = 0.5f;  // centre of the screen box at rest
   float look = 0;       // -1 left .. 1 right
@@ -183,14 +186,15 @@ static void drawSparkle(Canvas& g, float x, float y, float r, uint16_t c) {
   g.fillTriangle(ir(x - r), ir(y), ir(x), ir(y - w), ir(x), ir(y + w), c);
   g.fillTriangle(ir(x + r), ir(y), ir(x), ir(y - w), ir(x), ir(y + w), c);
 }
-
-// Turns CardKB2 HID key reports into game buttons.
-// Arrows or D/X/C/Z = direction (D up, X down, Z left, C right),
-// SPACE/ENTER = A, ESC/BACKSPACE = B, P = pause
+// Turns CardKB2 HID key reports into game buttons and typed characters.
+// Game / menu mode: Arrows or D/X/C/Z = direction (D up, X down, Z left, C right),
+//                   SPACE/ENTER = A, ESC/BACKSPACE = B, P = pause, TAB = tab
+// Text mode (chat, passwords, API keys): every letter types. Arrows still move,
+//                   ENTER = A (send/save), ESC = B (back), TAB = tab, BACKSPACE deletes.
 #include <stdint.h>
 #include <string.h>
 
-enum Btn : uint8_t { B_UP, B_DOWN, B_LEFT, B_RIGHT, B_A, B_B, B_PAUSE, B_COUNT };
+enum Btn : uint8_t { B_UP, B_DOWN, B_LEFT, B_RIGHT, B_A, B_B, B_PAUSE, B_TAB, B_COUNT };
 
 struct Input {
   bool     held[B_COUNT]    = {};
@@ -203,6 +207,13 @@ struct Input {
   bool     rawHeld[B_COUNT]   = {};
   uint8_t  prevKeys[6] = {};
 
+  // ---- text typing ----
+  bool     textMode = false;          // set by the UI each frame
+  char     chq[64];                   // typed characters ('\b' = backspace)
+  uint8_t  chHead = 0, chTail = 0;
+  bool     bkspHeld = false, bkspNew = false;
+  uint32_t bkspStart = 0, bkspLast = 0;
+
   static int map(uint8_t kc) {
     switch (kc) {
       case 0x52: case 0x07: return B_UP;      // Up arrow, D
@@ -212,26 +223,85 @@ struct Input {
       case 0x2C: case 0x28: return B_A;       // Space, Enter
       case 0x29: case 0x2A: return B_B;       // Esc, Backspace
       case 0x13:            return B_PAUSE;   // P
+      case 0x2B:            return B_TAB;     // Tab
     }
     return -1;
   }
+  // While typing only these keys act as buttons; everything else types
+  static int mapText(uint8_t kc) {
+    switch (kc) {
+      case 0x52: return B_UP;
+      case 0x51: return B_DOWN;
+      case 0x50: return B_LEFT;
+      case 0x4F: return B_RIGHT;
+      case 0x28: case 0x58: return B_A;       // Enter, keypad Enter
+      case 0x29: return B_B;                  // Esc
+      case 0x2B: return B_TAB;                // Tab
+    }
+    return -1;
+  }
+  // US keyboard layout
+  static char toChar(uint8_t kc, bool shift) {
+    if (kc >= 0x04 && kc <= 0x1D) { char c = (char)('a' + (kc - 0x04)); return shift ? (char)(c - 32) : c; }
+    if (kc >= 0x1E && kc <= 0x27) {
+      static const char num[] = "1234567890", sym[] = "!@#$%^&*()";
+      return shift ? sym[kc - 0x1E] : num[kc - 0x1E];
+    }
+    switch (kc) {
+      case 0x2C: return ' ';
+      case 0x2D: return shift ? '_' : '-';
+      case 0x2E: return shift ? '+' : '=';
+      case 0x2F: return shift ? '{' : '[';
+      case 0x30: return shift ? '}' : ']';
+      case 0x31: return shift ? '|' : '\\';
+      case 0x33: return shift ? ':' : ';';
+      case 0x34: return shift ? '"' : '\'';
+      case 0x35: return shift ? '~' : '`';
+      case 0x36: return shift ? '<' : ',';
+      case 0x37: return shift ? '>' : '.';
+      case 0x38: return shift ? '?' : '/';
+    }
+    return 0;
+  }
+  void pushChar(char c) {
+    uint8_t n = (uint8_t)((chHead + 1) % sizeof(chq));
+    if (n == chTail) return;              // full: drop
+    chq[chHead] = c; chHead = n;
+  }
+  // Next typed character, 0 if none
+  char getChar() {
+    if (chTail == chHead) return 0;
+    char c = chq[chTail]; chTail = (uint8_t)((chTail + 1) % sizeof(chq));
+    return c;
+  }
+  void clearChars() { chHead = chTail = 0; }
 
-  // Called with each 8-byte keyboard report (keys = the 6 keycode bytes)
-  void onHid(const uint8_t keys[6]) {
+  // Called with each 8-byte keyboard report: mod = modifier byte, keys = the 6 keycode bytes
+  void onHid(uint8_t mod, const uint8_t keys[6]) {
     bool now[B_COUNT] = {};
+    bool shift = (mod & 0x22) != 0;
+    bool bk = false;
     for (int i = 0; i < 6; i++) {
-      int b = map(keys[i]);
+      uint8_t kc = keys[i];
+      if (kc < 0x04) continue;              // 0 = none, 1-3 = errors
+      bool was = false;
+      for (int j = 0; j < 6; j++) if (prevKeys[j] == kc) was = true;
+      if (textMode) {
+        if (kc == 0x2A) { bk = true; if (!was) bkspNew = true; continue; }
+        char c = toChar(kc, shift);
+        if (c) { if (!was) pushChar(c); continue; }
+      }
+      int b = textMode ? mapText(kc) : map(kc);
       if (b < 0) continue;
       now[b] = true;
-      bool was = false;
-      for (int j = 0; j < 6; j++) if (prevKeys[j] == keys[i]) was = true;
       if (!was) pending[b] = true;
     }
+    bkspHeld = bk;
     memcpy(rawHeld, now, sizeof(now));
     memcpy(prevKeys, keys, 6);
   }
 
-  void releaseAll() { memset(rawHeld, 0, sizeof(rawHeld)); memset(prevKeys, 0, 6); }
+  void releaseAll() { memset(rawHeld, 0, sizeof(rawHeld)); memset(prevKeys, 0, 6); bkspHeld = false; }
 
   // Call once per frame before the UI/game update
   void frame(uint32_t now) {
@@ -246,10 +316,12 @@ struct Input {
         rep[b] = true; lastRep[b] = now;
       }
     }
+    // backspace: one delete on press, then repeats while held
+    if (bkspNew) { pushChar('\b'); bkspNew = false; bkspStart = bkspLast = now; }
+    else if (bkspHeld && now - bkspStart > 400 && now - bkspLast > 60) { pushChar('\b'); bkspLast = now; }
   }
   uint32_t heldMs(Btn b, uint32_t now) const { return held[b] ? now - holdStart[b] : 0; }
 };
-
 // Functions the UI/games need from the hardware. Defined in AltoidsOS.ino (device)
 // so the UI code itself stays hardware-independent.
 #include <stdint.h>
@@ -260,6 +332,857 @@ void     plat_saveInt(const char* key, int value);
 int      plat_kbState();                            // 0 scanning, 1 connecting, 2 paired, 3 ready
 void     plat_setFlip(bool flip);                    // rotate the screen 180 degrees
 
+// ---- storage (strings) and big buffers ----
+void     plat_loadStr(const char* key, char* out, int max);   // "" if missing
+void     plat_saveStr(const char* key, const char* value);
+void*    plat_bigAlloc(int bytes);                  // PSRAM on the device
+
+// ---- WiFi ----
+void     plat_wifiScanStart();
+int      plat_wifiScanCount();                      // -1 still scanning, -2 failed, else count
+void     plat_wifiScanGet(int i, char* ssid, int max, int* rssi, int* open);
+void     plat_wifiConnect(const char* ssid, const char* pass);
+void     plat_wifiDisconnect();
+int      plat_wifiState();                          // 0 off, 1 connecting, 2 connected, 3 failed
+int      plat_wifiReason();                         // last disconnect reason code
+void     plat_wifiInfo(char* ssid, int max, char* ip, int ipmax, int* rssi);
+
+// ---- AI request (runs in the background) ----
+bool     plat_aiStart(const char* apiKey, const char* body, bool verifyTls);  // false if busy
+int      plat_aiState();                            // 0 idle, 1 connecting, 2 waiting, 3 streaming, 4 done, 5 error
+int      plat_aiRead(char* out, int max);           // new answer text since last call
+void     plat_aiInfo(char* status, int smax, char* sources, int srcmax, char* err, int emax);
+void     plat_aiCancel();
+// "Ask" - AI chat in a Perplexity-style layout:
+//   question as a bold title -> source chips -> little computer + "Answer" -> answer text
+// Uses the Perplexity Agent API (POST https://api.perplexity.ai/v1/agent, streamed).
+// Hardware-independent helpers for the AI chat:
+//  - JSON writing / reading (just enough for the Perplexity Agent API)
+//  - HTTP response + chunked transfer + server-sent-events line splitter
+//  - Agent API stream event handling (text deltas, search queries, sources, errors)
+//  - Unicode -> ASCII (the screen fonts only have ASCII)
+// Everything is inside structs so the Arduino IDE's auto-prototypes never break it.
+#include <stdint.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <ctype.h>
+
+// ---------------- fixed-size string builder ----------------
+struct SBuf {
+  char* p; int cap; int n; bool overflow;
+  SBuf(char* buf, int c) : p(buf), cap(c), n(0), overflow(false) { if (cap > 0) p[0] = 0; }
+  void addc(char c) { if (n < cap - 1) { p[n++] = c; p[n] = 0; } else overflow = true; }
+  void add(const char* s) { while (*s) addc(*s++); }
+  // JSON string with quotes and escaping
+  void addJson(const char* s) {
+    addc('"');
+    for (; *s; s++) {
+      unsigned char c = (unsigned char)*s;
+      if (c == '"' || c == '\\') { addc('\\'); addc((char)c); }
+      else if (c == '\n') add("\\n");
+      else if (c == '\r') add("\\r");
+      else if (c == '\t') add("\\t");
+      else if (c < 0x20) { char b[8]; snprintf(b, sizeof(b), "\\u%04x", c); add(b); }
+      else addc((char)c);
+    }
+    addc('"');
+  }
+};
+
+// ---------------- Unicode -> ASCII ----------------
+struct Ascii {
+  // Writes up to 3 chars for code point cp into o, returns count
+  static int fromCp(uint32_t cp, char* o) {
+    if (cp == '\n') { o[0] = '\n'; return 1; }
+    if (cp == '\t') { o[0] = ' '; return 1; }
+    if (cp < 0x20 || cp == 0x7F) return 0;
+    if (cp < 0x80) { o[0] = (char)cp; return 1; }
+    if (cp >= 0xC0 && cp <= 0xFF) {
+      static const char lat[] = "AAAAAAACEEEEIIIIDNOOOOOxOUUUUYTsaaaaaaaceeeeiiiidnooooo/ouuuuyty";
+      o[0] = lat[cp - 0xC0]; return 1;
+    }
+    switch (cp) {
+      case 0x2018: case 0x2019: case 0x201A: case 0x2032: case 0x00B4: o[0] = '\''; return 1;
+      case 0x201C: case 0x201D: case 0x201E: case 0x2033: case 0x00AB: case 0x00BB: o[0] = '"'; return 1;
+      case 0x2010: case 0x2011: case 0x2012: case 0x2013: case 0x2014: case 0x2212: o[0] = '-'; return 1;
+      case 0x00A0: case 0x2002: case 0x2003: case 0x2004: case 0x2005: case 0x2006:
+      case 0x2007: case 0x2008: case 0x2009: case 0x200A: case 0x202F: o[0] = ' '; return 1;
+      case 0x2022: case 0x00B7: case 0x25CF: case 0x2023: case 0x25E6: o[0] = '*'; return 1;
+      case 0x2026: o[0] = '.'; o[1] = '.'; o[2] = '.'; return 3;
+      case 0x00D7: o[0] = 'x'; return 1;
+      case 0x2192: o[0] = '-'; o[1] = '>'; return 2;
+      case 0x2190: o[0] = '<'; o[1] = '-'; return 2;
+      case 0x2264: o[0] = '<'; o[1] = '='; return 2;
+      case 0x2265: o[0] = '>'; o[1] = '='; return 2;
+      case 0x2248: o[0] = '~'; return 1;
+      case 0x00B0: o[0] = 'd'; o[1] = 'e'; o[2] = 'g'; return 3;
+      case 0x00B1: o[0] = '+'; o[1] = '/'; o[2] = '-'; return 3;
+      case 0x00BD: o[0] = '1'; o[1] = '/'; o[2] = '2'; return 3;
+      case 0x00BC: o[0] = '1'; o[1] = '/'; o[2] = '4'; return 3;
+      case 0x00A9: o[0] = '('; o[1] = 'c'; o[2] = ')'; return 3;
+      case 0x00AE: o[0] = '('; o[1] = 'R'; o[2] = ')'; return 3;
+      case 0x2122: o[0] = 'T'; o[1] = 'M'; return 2;
+      case 0x20AC: o[0] = 'E'; o[1] = 'U'; o[2] = 'R'; return 3;
+      case 0x00A3: o[0] = 'G'; o[1] = 'B'; o[2] = 'P'; return 3;
+      case 0x00A5: o[0] = 'Y'; o[1] = 'E'; o[2] = 'N'; return 3;
+      case 0x200B: case 0x200C: case 0x200D: case 0xFEFF: case 0xFE0F: return 0;
+    }
+    if (cp >= 0x2600 && cp <= 0x27BF) return 0;     // symbols / dingbats
+    if (cp >= 0x1F000) return 0;                    // emoji
+    o[0] = '?'; return 1;
+  }
+};
+
+// ---------------- minimal JSON reader ----------------
+struct Json {
+  static bool ws(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+  // Pointer to the value of "key". depth 1 = keys of the outer object, -1 = any depth.
+  static const char* find(const char* s, const char* key, int wantDepth) {
+    if (!s) return nullptr;
+    int depth = 0; bool inStr = false; size_t kl = strlen(key);
+    for (const char* p = s; *p; p++) {
+      char c = *p;
+      if (inStr) {
+        if (c == '\\') { if (p[1]) p++; }
+        else if (c == '"') inStr = false;
+        continue;
+      }
+      if (c == '"') {
+        if ((wantDepth < 0 || depth == wantDepth) && strncmp(p + 1, key, kl) == 0 && p[1 + kl] == '"') {
+          const char* q = p + 2 + kl;
+          while (ws(*q)) q++;
+          if (*q == ':') { q++; while (ws(*q)) q++; return q; }
+        }
+        inStr = true; continue;
+      }
+      if (c == '{' || c == '[') depth++;
+      else if (c == '}' || c == ']') depth--;
+    }
+    return nullptr;
+  }
+  static int hexv(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  }
+  static long hex4(const char* p) {
+    long v = 0;
+    for (int i = 0; i < 4; i++) { int h = hexv(p[i]); if (h < 0) return -1; v = v * 16 + h; }
+    return v;
+  }
+  // Decode the JSON string at v (pointing at the opening quote) into printable ASCII.
+  // Returns the number of chars written (0 if v is not a string). *end = char after the string.
+  static int str(const char* v, char* out, int max, const char** end) {
+    int n = 0;
+    if (max > 0) out[0] = 0;
+    if (end) *end = v;
+    if (!v || *v != '"' || max <= 0) return 0;
+    const unsigned char* p = (const unsigned char*)v + 1;
+    char tmp[3];
+    while (*p && *p != '"') {
+      uint32_t cp;
+      if (*p == '\\') {
+        p++;
+        if (!*p) break;
+        switch (*p) {
+          case 'n': cp = '\n'; p++; break;
+          case 't': case 'b': case 'f': cp = ' '; p++; break;
+          case 'r': cp = 0; p++; break;
+          case 'u': {
+            long h = hex4((const char*)p + 1);
+            if (h < 0) { p++; cp = 0; break; }
+            p += 5; cp = (uint32_t)h;
+            if (cp >= 0xD800 && cp < 0xDC00 && p[0] == '\\' && p[1] == 'u') {
+              long lo = hex4((const char*)p + 2);
+              if (lo >= 0xDC00 && lo < 0xE000) { cp = 0x10000 + ((cp - 0xD800) << 10) + ((uint32_t)lo - 0xDC00); p += 6; }
+            }
+            break;
+          }
+          default: cp = *p; p++; break;       // \" \\ \/
+        }
+      } else if (*p < 0x80) { cp = *p; p++; }
+      else {                                   // raw UTF-8
+        int extra = (*p >= 0xF0) ? 3 : (*p >= 0xE0) ? 2 : (*p >= 0xC0) ? 1 : 0;
+        cp = *p & (0x3F >> extra); p++;
+        for (int i = 0; i < extra && (*p & 0xC0) == 0x80; i++) { cp = (cp << 6) | (*p & 0x3F); p++; }
+      }
+      int k = cp ? Ascii::fromCp(cp, tmp) : 0;
+      for (int i = 0; i < k && n < max - 1; i++) out[n++] = tmp[i];
+    }
+    out[n] = 0;
+    if (end) *end = (const char*)(*p == '"' ? p + 1 : p);
+    return n;
+  }
+  static int getStr(const char* json, const char* key, int depth, char* out, int max) {
+    return str(find(json, key, depth), out, max, nullptr);
+  }
+};
+
+// ---------------- HTTP response -> body lines ----------------
+// Feed raw socket bytes; calls onLine for every body line (status line/headers handled here).
+typedef void (*LineFn)(void* ctx, const char* line, int len, bool truncated);
+struct HttpLines {
+  int status; bool chunked; bool inBody;
+  int ck;              // 0 size line, 1 data, 2 CRLF after data, 3 finished
+  long ckLeft; char ckLine[24]; int ckLen;
+  char hline[320]; int hlen;
+  char* line; int cap; int len; bool trunc;
+  LineFn fn; void* ctx;
+  void begin(char* buf, int c, LineFn f, void* x) {
+    status = 0; chunked = false; inBody = false; ck = 0; ckLeft = 0; ckLen = 0; hlen = 0;
+    line = buf; cap = c; len = 0; trunc = false; fn = f; ctx = x;
+  }
+  void headerLine() {
+    hline[hlen] = 0;
+    if (status == 0) {                       // "HTTP/1.1 200 OK"
+      const char* sp = strchr(hline, ' ');
+      status = sp ? atoi(sp + 1) : -1;
+      if (status == 0) status = -1;
+    } else if (hlen == 0) {
+      inBody = true;
+    } else {
+      for (int i = 0; i < hlen; i++) hline[i] = (char)tolower((unsigned char)hline[i]);
+      if (strncmp(hline, "transfer-encoding:", 18) == 0 && strstr(hline, "chunked")) chunked = true;
+    }
+    hlen = 0;
+  }
+  void bodyByte(char c) {
+    if (c == '\n') { line[len] = 0; fn(ctx, line, len, trunc); len = 0; trunc = false; }
+    else if (c == '\r') {}
+    else if (len < cap - 1) line[len++] = c;
+    else trunc = true;
+  }
+  void feed(const uint8_t* d, int n) {
+    for (int i = 0; i < n; i++) {
+      char c = (char)d[i];
+      if (!inBody) {
+        if (c == '\n') headerLine();
+        else if (c != '\r' && hlen < (int)sizeof(hline) - 1) hline[hlen++] = c;
+        continue;
+      }
+      if (!chunked) { bodyByte(c); continue; }
+      switch (ck) {
+        case 0:
+          if (c == '\n') {
+            ckLine[ckLen] = 0; ckLeft = strtol(ckLine, nullptr, 16); ckLen = 0;
+            ck = ckLeft > 0 ? 1 : 3;
+          } else if (c != '\r' && ckLen < (int)sizeof(ckLine) - 1) ckLine[ckLen++] = c;
+          break;
+        case 1: bodyByte(c); if (--ckLeft <= 0) ck = 2; break;
+        case 2: if (c == '\n') ck = 0; break;
+        default: break;
+      }
+    }
+  }
+  void finish() { if (len > 0) { line[len] = 0; fn(ctx, line, len, trunc); len = 0; } }
+};
+
+// ---------------- Perplexity Agent API stream ----------------
+// POST https://api.perplexity.ai/v1/agent  {"preset":..., "stream":true, "input":[...]}
+// Events arrive as "data: {json}" lines; text comes in "response.output_text.delta" events,
+// sources in "search_results" output items, and the stream ends with "data: [DONE]".
+struct AiStream {
+  HttpLines http;
+  char* out; int outCap; int outLen;        // decoded answer text (ASCII)
+  char status[72];                          // e.g. "Searching: best shrimp food"
+  char sources[200]; int nSrc;              // domains separated by '\n'
+  char err[200];
+  char errBody[700]; int errLen;
+  bool gotDone, failed, incomplete, gotText;
+
+  static void lineCb(void* ctx, const char* l, int n, bool t) { ((AiStream*)ctx)->onLine(l, n, t); }
+  void begin(char* lineBuf, int lineCap, char* outBuf, int outCapacity) {
+    http.begin(lineBuf, lineCap, lineCb, this);
+    out = outBuf; outCap = outCapacity; outLen = 0; if (outCap > 0) out[0] = 0;
+    status[0] = sources[0] = err[0] = errBody[0] = 0; nSrc = 0; errLen = 0;
+    gotDone = failed = incomplete = gotText = false;
+  }
+  void feed(const uint8_t* d, int n) { http.feed(d, n); }
+  void finish() { http.finish(); if (http.status != 200) buildHttpError(); }
+
+  void append(const char* s, int n) {
+    for (int i = 0; i < n && outLen < outCap - 1; i++) out[outLen++] = s[i];
+    out[outLen] = 0;
+    if (n > 0) gotText = true;
+  }
+  void addSource(const char* url) {
+    const char* p = strstr(url, "://"); p = p ? p + 3 : url;
+    if (strncmp(p, "www.", 4) == 0) p += 4;
+    char d[40]; int k = 0;
+    while (*p && *p != '/' && *p != ':' && *p != '?' && *p != '#' && k < 39) d[k++] = *p++;
+    d[k] = 0;
+    if (!k || nSrc >= 6) return;
+    // no duplicates
+    const char* s = sources;
+    while (*s) {
+      const char* e = strchr(s, '\n'); int L = e ? (int)(e - s) : (int)strlen(s);
+      if (L == k && strncmp(s, d, k) == 0) return;
+      s += L; if (*s) s++;
+    }
+    size_t used = strlen(sources);
+    if (used + k + 2 >= sizeof(sources)) return;
+    if (used) strcat(sources, "\n");
+    strcat(sources, d); nSrc++;
+  }
+  void onSearchItem(const char* j) {
+    // first query -> status line
+    const char* q = Json::find(j, "queries", -1);
+    if (q && *q == '[') {
+      q++; while (Json::ws(*q)) q++;
+      char qs[56];
+      if (Json::str(q, qs, sizeof(qs), nullptr) > 0) snprintf(status, sizeof(status), "Searching: %s", qs);
+    }
+    // every "url" -> source domain
+    const char* p = j;
+    while ((p = Json::find(p, "url", -1)) != nullptr) {
+      char u[160]; const char* e;
+      if (Json::str(p, u, sizeof(u), &e) > 0) addSource(u);
+      p = e > p ? e : p + 1;
+    }
+  }
+  void onLine(const char* l, int n, bool truncated) {
+    (void)n;
+    if (http.status != 200) {                  // error body: keep the start of it
+      for (const char* s = l; *s && errLen < (int)sizeof(errBody) - 2; s++) errBody[errLen++] = *s;
+      errBody[errLen++] = ' '; errBody[errLen] = 0;
+      return;
+    }
+    if (strncmp(l, "data:", 5) != 0) return;    // ignore "event:", "id:", ": comments"
+    const char* j = l + 5;
+    while (*j == ' ') j++;
+    if (strncmp(j, "[DONE]", 6) == 0) { gotDone = true; return; }
+    char type[64];
+    Json::getStr(j, "type", 1, type, sizeof(type));
+    if (strcmp(type, "response.output_text.delta") == 0) {
+      char buf[1024];
+      int k = Json::getStr(j, "delta", 1, buf, sizeof(buf));
+      append(buf, k);
+      if (!status[0] || strncmp(status, "Searching", 9) == 0) strcpy(status, "Answering");
+    } else if (strncmp(type, "response.output_item.", 21) == 0 || (!type[0] && truncated)) {
+      char it[40];
+      Json::getStr(j, "type", 2, it, sizeof(it));
+      if (strcmp(it, "search_results") == 0 || (!it[0] && strstr(j, "\"search_results\""))) onSearchItem(j);
+      else if (!gotText && strcmp(it, "fetch_url_results") == 0) strcpy(status, "Reading pages");
+    } else if (strcmp(type, "response.created") == 0 || strcmp(type, "response.in_progress") == 0) {
+      if (!status[0]) strcpy(status, "Thinking");
+    } else if (strcmp(type, "error") == 0) {
+      char m[160];
+      if (Json::getStr(j, "message", -1, m, sizeof(m)) > 0) snprintf(err, sizeof(err), "%s", m);
+      else strcpy(err, "The API sent an error");
+      failed = true;
+    } else if (strcmp(type, "response.failed") == 0) {
+      if (!err[0]) {
+        char m[160];
+        if (Json::getStr(j, "message", -1, m, sizeof(m)) > 0) snprintf(err, sizeof(err), "%s", m);
+        else strcpy(err, "The request failed");
+      }
+      failed = true;
+    } else if (strcmp(type, "response.incomplete") == 0) {
+      incomplete = true;
+    }
+  }
+  void buildHttpError() {
+    char m[150] = "";
+    Json::getStr(errBody, "message", -1, m, sizeof(m));
+    int s = http.status;
+    const char* hint = "";
+    if (s == 401) hint = "API key not accepted. Check the key in Settings > API keys.";
+    else if (s == 402) hint = "No API credits left on this account.";
+    else if (s == 403) hint = "This key is not allowed to use the Agent API.";
+    else if (s == 429) hint = "Too many requests or out of credits. Wait a bit.";
+    else if (s >= 500) hint = "Perplexity server problem. Try again.";
+    SBuf e(err, sizeof(err));
+    if (s <= 0) { e.add("No valid reply from the server."); }
+    else {
+      char num[12]; snprintf(num, sizeof(num), "%d", s);
+      e.add("Error "); e.add(num);
+      if (m[0]) { e.add(": "); e.add(m); }
+      if (hint[0]) { e.add(m[0] ? ". " : ". "); e.add(hint); }
+    }
+    failed = true;
+  }
+};
+
+// ---- turns raw model markdown into clean screen text ----
+// Output lines: "\x01" prefix = heading, "\x02" prefix = bullet, empty line = paragraph gap.
+struct AiText {
+  static void put(char* out, int& o, int max, char c) { if (o < max - 1) out[o++] = c; }
+  // "[1]", "[web:1]", "[1, 2]" citation markers. Returns length, 0 = not one, -1 = cut off at the end
+  static int citeLen(const char* p, const char* e) {
+    const char* q = p + 1;
+    const char* w = q;
+    while (q < e && isalpha((unsigned char)*q)) q++;
+    if (q < e && *q == ':' && q > w) q++;
+    else if (q >= e) return -1;
+    else q = w;
+    if (q >= e) return -1;
+    if (!isdigit((unsigned char)*q)) return 0;
+    while (q < e && (isdigit((unsigned char)*q) || *q == ',' || *q == ' ' || *q == '-')) q++;
+    if (q >= e) return -1;
+    return *q == ']' ? (int)(q - p + 1) : 0;
+  }
+  static bool sepLine(const char* s, const char* e) {      // "|---|:--|" or "---"
+    bool dash = false;
+    for (const char* q = s; q < e; q++) {
+      if (*q == '-') dash = true;
+      else if (*q != '|' && *q != ':' && *q != ' ') return false;
+    }
+    return dash;
+  }
+  static int clean(const char* in, int n, char* out, int max, bool streaming) {
+    int o = 0;
+    const char* p = in; const char* e = in + n;
+    bool lastBlank = true;
+    while (p < e) {
+      const char* le = p; while (le < e && *le != '\n') le++;
+      const char* s = p; while (s < le && *s == ' ') s++;
+      const char* lineEnd = le;
+      while (lineEnd > s && lineEnd[-1] == ' ') lineEnd--;
+      if (s == lineEnd) {                                // blank line
+        if (!lastBlank) { put(out, o, max, '\n'); lastBlank = true; }
+        p = le + 1; continue;
+      }
+      if (sepLine(s, lineEnd)) { p = le + 1; continue; }
+      if (*s == '#') {
+        while (s < lineEnd && *s == '#') s++;
+        while (s < lineEnd && *s == ' ') s++;
+        put(out, o, max, '\x01');
+      } else if ((*s == '-' || *s == '*' || *s == '+') && s + 1 < lineEnd && s[1] == ' ') {
+        s += 2; put(out, o, max, '\x02');
+      } else if (*s == '|') {
+        s++; while (s < lineEnd && *s == ' ') s++;
+        while (lineEnd > s && (lineEnd[-1] == '|' || lineEnd[-1] == ' ')) lineEnd--;
+      }
+      bool atEnd = (le == e);
+      const char* q = s;
+      while (q < lineEnd) {
+        char c = *q;
+        if (c == '*') {
+          if (q + 1 < lineEnd && q[1] == '*') { q += 2; continue; }
+          bool spaced = q > s && q[-1] == ' ' && q + 1 < lineEnd && q[1] == ' ';
+          if (!spaced) { q++; continue; }
+        }
+        if (c == '_' && q + 1 < lineEnd && q[1] == '_') { q += 2; continue; }
+        if (c == '`') { q++; continue; }
+        if (c == '\\' && q + 1 < lineEnd && strchr("()[]", q[1])) { q += 2; continue; }
+        if (c == '[') {
+          int k = citeLen(q, lineEnd);
+          if (k < 0) {
+            if (streaming && atEnd) break;               // still arriving: hide for now
+            k = 0;
+          }
+          if (k > 0) {
+            char nx = q + k < lineEnd ? q[k] : ' ';
+            if (o > 0 && out[o - 1] == ' ' && strchr(" .,;:!?)", nx)) o--;
+            q += k; continue;
+          }
+          // [text](url) -> text
+          const char* r = q + 1; while (r < lineEnd && *r != ']') r++;
+          if (r + 1 < lineEnd && r[1] == '(') {
+            const char* t = r + 2; while (t < lineEnd && *t != ')') t++;
+            if (t < lineEnd) {
+              for (const char* z = q + 1; z < r; z++) if (*z != '*') put(out, o, max, *z);
+              q = t + 1; continue;
+            }
+          }
+        }
+        put(out, o, max, c);
+        q++;
+      }
+      while (o > 0 && out[o - 1] == ' ') o--;
+      put(out, o, max, '\n');
+      lastBlank = false;
+      p = le + 1;
+    }
+    while (o > 0 && out[o - 1] == '\n') o--;
+    out[o] = 0;
+    return o;
+  }
+};
+
+// line kinds for the chat layout (outside the struct so the Arduino IDE parses it)
+enum ChatKind { L_Q, L_QS, L_SRC, L_LABEL, L_SKEL, L_BODY, L_HEAD, L_BUL1, L_BUL, L_NOTE, L_GAP, L_RULE };
+
+struct Chat {
+  static const int MAXM = 16, RAW_CAP = 6000, DISP_CAP = 6200, MAXL = 1400, BODY_CAP = 16384, IN_MAX = 300;
+  static const int TOP = 34, BOT = 200, LX = 12, LW = 296;
+  struct Msg {
+    bool user, pending, noteErr, bad;   // noteErr = red note, bad = leave out of the history
+    char* raw; int rawLen;
+    char* disp; int dispLen;
+    char src[200];
+    char note[200];
+  };
+  struct Line { int16_t msg; uint16_t start, len; uint8_t kind, h; };
+
+  Msg msgs[MAXM]; int nMsg = 0;
+  Line* lines = nullptr; int nLines = 0, contentH = 0;
+  char* body = nullptr;
+  bool ready = false;
+
+  char input[IN_MAX + 1] = ""; int inLen = 0;
+  bool scrollMode = false, follow = true, busy = false;
+  float scroll = 0, scrollDraw = 0;
+  char status[72] = "";
+  int aiSt = 0;
+  char toast[96] = ""; uint32_t toastAt = 0;
+  uint32_t sentAt = 0;
+
+  // set by the App before update()
+  const char* apiKey = "";
+  bool shortAnswers = true, pro = false, verifyTls = true;
+
+  void init() {
+    if (ready) return;
+    char* arena = (char*)plat_bigAlloc(MAXM * (RAW_CAP + DISP_CAP));
+    lines = (Line*)plat_bigAlloc(MAXL * sizeof(Line));
+    body = (char*)plat_bigAlloc(BODY_CAP);
+    if (!arena || !lines || !body) return;
+    for (int i = 0; i < MAXM; i++) {
+      msgs[i].raw = arena + i * (RAW_CAP + DISP_CAP);
+      msgs[i].disp = msgs[i].raw + RAW_CAP;
+    }
+    ready = true;
+    clear();
+  }
+  void clear() { nMsg = 0; nLines = 0; contentH = 0; scroll = scrollDraw = 0; follow = true; }
+  void enter() { init(); scrollMode = false; }
+
+  // ---------------- layout ----------------
+  static int adv(const GFXfont* f, char c) {
+    uint8_t u = (uint8_t)c;
+    if (u < f->first || u > f->last) return 0;
+    return f->glyph[u - f->first].xAdvance;
+  }
+  void addLine(int m, int start, int len, ChatKind k, int h) {
+    if (nLines >= MAXL) return;
+    Line& L = lines[nLines++];
+    L.msg = (int16_t)m; L.start = (uint16_t)start; L.len = (uint16_t)len; L.kind = k; L.h = (uint8_t)h;
+    contentH += h;
+  }
+  // word-wrap text[from, to) at pixel width w
+  void wrap(int m, const char* t, int from, int to, const GFXfont* f, int w, ChatKind first, ChatKind rest, int h) {
+    int i = from; bool firstLine = true;
+    while (i < to) {
+      int ls = i, px = 0, lastSp = -1, end = to, next = to;
+      while (i < to) {
+        int cw = adv(f, t[i]);
+        if (px + cw > w && i > ls) {
+          if (lastSp > ls) { end = lastSp; next = lastSp + 1; }
+          else { end = i; next = i; }
+          break;
+        }
+        if (t[i] == ' ') lastSp = i;
+        px += cw; i++;
+      }
+      if (i >= to) { end = to; next = to; }
+      addLine(m, ls, end - ls, firstLine ? first : rest, h);
+      firstLine = false;
+      i = next;
+      while (i < to && t[i] == ' ') i++;          // no leading spaces on wrapped lines
+    }
+  }
+  void layout() {
+    nLines = 0; contentH = 0;
+    addLine(-1, 0, 0, L_GAP, 6);
+    for (int m = 0; m < nMsg; m++) {
+      Msg& M = msgs[m];
+      if (M.user) {
+        bool big = M.rawLen <= 70;
+        wrap(m, M.raw, 0, M.rawLen, big ? &FreeSansBold12pt7b : &FreeSansBold9pt7b, LW, big ? L_Q : L_QS, big ? L_Q : L_QS, big ? 23 : 18);
+        addLine(m, 0, 0, L_GAP, 6);
+        continue;
+      }
+      if (M.src[0]) addLine(m, 0, 0, L_SRC, 24);
+      addLine(m, 0, 0, L_LABEL, 22);
+      if (M.pending && M.dispLen == 0) { for (int k = 0; k < 3; k++) addLine(m, k, 0, L_SKEL, 13); }
+      const char* d = M.disp; int i = 0;
+      while (i < M.dispLen) {
+        int e = i; while (e < M.dispLen && d[e] != '\n') e++;
+        if (e == i) addLine(m, 0, 0, L_GAP, 7);
+        else if (d[i] == '\x01') wrap(m, d, i + 1, e, &FreeSansBold9pt7b, LW, L_HEAD, L_HEAD, 19);
+        else if (d[i] == '\x02') wrap(m, d, i + 1, e, &FreeSans9pt7b, LW - 14, L_BUL1, L_BUL, 17);
+        else wrap(m, d, i, e, &FreeSans9pt7b, LW, L_BODY, L_BODY, 17);
+        i = e + 1;
+      }
+      if (M.note[0]) { addLine(m, 0, 0, L_GAP, 4); wrap(m, M.note, 0, (int)strlen(M.note), &FreeSans9pt7b, LW, L_NOTE, L_NOTE, 17); }
+      if (m < nMsg - 1) { addLine(m, 0, 0, L_GAP, 10); addLine(m, 0, 0, L_RULE, 1); addLine(m, 0, 0, L_GAP, 12); }
+      else addLine(m, 0, 0, L_GAP, 10);
+    }
+  }
+  int maxScroll() const { int v = contentH - (BOT - TOP); return v > 0 ? v : 0; }
+
+  // ---------------- messages ----------------
+  Msg& push(bool user) {
+    if (nMsg >= MAXM) {                    // drop the oldest question + answer
+      Msg a = msgs[0], b = msgs[1];
+      for (int i = 2; i < MAXM; i++) msgs[i - 2] = msgs[i];
+      msgs[MAXM - 2] = a; msgs[MAXM - 1] = b;
+      nMsg -= 2;
+    }
+    Msg& M = msgs[nMsg++];
+    M.user = user; M.pending = false; M.noteErr = false; M.bad = false;
+    M.rawLen = 0; M.raw[0] = 0; M.dispLen = 0; M.disp[0] = 0; M.src[0] = 0; M.note[0] = 0;
+    return M;
+  }
+  void reclean(Msg& M) { M.dispLen = AiText::clean(M.raw, M.rawLen, M.disp, DISP_CAP, M.pending); }
+  void showToast(const char* s, uint32_t now) { snprintf(toast, sizeof(toast), "%s", s); toastAt = now; }
+
+  bool buildBody() {
+    SBuf b(body, BODY_CAP);
+    b.add("{\"preset\":"); b.addJson(pro ? "low" : "fast");
+    b.add(",\"stream\":true,\"input\":[");
+    // newest history that fits (the new question is msgs[nMsg-2])
+    int start = nMsg - 2, budget = 9000;
+    for (int i = nMsg - 3; i >= 1; i -= 2) {
+      Msg& q = msgs[i - 1]; Msg& a = msgs[i];
+      if (!q.user || a.user) break;
+      if (a.bad || a.rawLen == 0) continue;
+      budget -= q.rawLen + a.rawLen + 120;
+      if (budget < 0) break;
+      start = i - 1;
+    }
+    bool firstItem = true;
+    for (int i = start; i < nMsg - 1; i++) {
+      Msg& M = msgs[i];
+      if (!M.user && (M.rawLen == 0 || M.bad)) continue;
+      if (M.user && i + 1 < nMsg - 1 && (msgs[i + 1].rawLen == 0 || msgs[i + 1].bad)) { i++; continue; }  // skip failed turns
+      if (!firstItem) b.addc(',');
+      firstItem = false;
+      b.add("{\"type\":\"message\",\"role\":"); b.addJson(M.user ? "user" : "assistant");
+      b.add(",\"content\":");
+      if (M.user && i == nMsg - 2 && shortAnswers) {
+        static char tmp[IN_MAX + 120];
+        snprintf(tmp, sizeof(tmp), "%s\n\n(Keep the answer short: under 120 words, plain text, no tables.)", M.raw);
+        b.addJson(tmp);
+      } else b.addJson(M.raw);
+      b.addc('}');
+    }
+    b.add("]}");
+    return !b.overflow;
+  }
+  void send(uint32_t now) {
+    if (!inLen) return;
+    if (!strcmp(input, "/new") || !strcmp(input, "/clear")) { clear(); inLen = 0; input[0] = 0; return; }
+    if (busy) return;
+    if (!apiKey || !apiKey[0]) { showToast("Add an API key first: Settings > API keys", now); return; }
+    if (plat_wifiState() != 2) { showToast("No WiFi. Connect in Settings > WiFi", now); return; }
+    Msg& q = push(true);
+    memcpy(q.raw, input, inLen + 1); q.rawLen = inLen;
+    Msg& a = push(false);
+    a.pending = true;
+    inLen = 0; input[0] = 0;
+    if (!buildBody() || !plat_aiStart(apiKey, body, verifyTls)) {
+      a.pending = false; a.noteErr = true; a.bad = true;
+      snprintf(a.note, sizeof(a.note), "Could not start the request (busy or too long).");
+    } else { busy = true; sentAt = now; status[0] = 0; aiSt = 1; }
+    follow = true;
+    layout();
+  }
+  void poll() {
+    if (!busy || nMsg == 0) return;
+    Msg& a = msgs[nMsg - 1];
+    bool changed = false;
+    char tmp[512]; int n;
+    while ((n = plat_aiRead(tmp, sizeof(tmp))) > 0) {
+      int room = RAW_CAP - 1 - a.rawLen;
+      if (n > room) n = room;
+      memcpy(a.raw + a.rawLen, tmp, n); a.rawLen += n; a.raw[a.rawLen] = 0;
+      changed = true;
+      if (room <= 0) break;
+    }
+    char src[200], err[200];
+    plat_aiInfo(status, sizeof(status), src, sizeof(src), err, sizeof(err));
+    if (strcmp(src, a.src)) { strcpy(a.src, src); changed = true; }
+    int st = plat_aiState();
+    aiSt = st;
+    if (st == 4 || st == 5 || st == 0) {
+      a.pending = false; busy = false;
+      if (st == 5) {
+        bool stopped = strcmp(err, "Stopped.") == 0;
+        a.bad = true; a.noteErr = !stopped;
+        snprintf(a.note, sizeof(a.note), "%s", err[0] ? err : "Something went wrong.");
+      } else if (a.rawLen == 0) {
+        a.bad = true; a.noteErr = true;
+        snprintf(a.note, sizeof(a.note), "%s", err[0] ? err : "No answer received.");
+      } else if (err[0]) snprintf(a.note, sizeof(a.note), "%s", err);   // e.g. answer cut off
+      changed = true;
+    }
+    if (changed) { reclean(a); layout(); }
+  }
+
+  // ---------------- update ----------------
+  // returns false when the user leaves the chat
+  bool update(Input& in, uint32_t now, uint32_t dt) {
+    in.textMode = !scrollMode;
+    if (!scrollMode) {
+      char c;
+      while ((c = in.getChar()) != 0) {
+        if (c == '\b') { if (inLen) input[--inLen] = 0; }
+        else if (inLen < IN_MAX) { input[inLen++] = c; input[inLen] = 0; }
+      }
+    }
+    if (in.pressed[B_TAB]) { scrollMode = !scrollMode; in.clearChars(); }
+    float step = 0;
+    if (in.rep[B_UP]) step -= 34;
+    if (in.rep[B_DOWN]) step += 34;
+    if (step != 0) {
+      scroll += step; follow = false;
+      if (scroll < 0) scroll = 0;
+      if (scroll >= maxScroll()) { scroll = (float)maxScroll(); follow = true; }
+    }
+    if (in.pressed[B_A]) { if (scrollMode) { scrollMode = false; in.clearChars(); } else send(now); }
+    if (in.pressed[B_B]) {
+      if (busy) { plat_aiCancel(); }
+      else if (scrollMode) { scrollMode = false; in.clearChars(); }
+      else { in.textMode = false; return false; }
+    }
+    poll();
+    if (follow) scroll = (float)maxScroll();
+    if (scroll > maxScroll()) scroll = (float)maxScroll();
+    float k = 1 - powf(0.0005f, dt / 1000.0f * 2.2f);
+    scrollDraw = lerpf(scrollDraw, scroll, k);
+    if (fabsf(scrollDraw - scroll) < 0.5f) scrollDraw = scroll;
+    return true;
+  }
+
+  // ---------------- drawing ----------------
+  void drawSub(Canvas& g, Font f, int x, int y, const char* s, int len, uint16_t c) {
+    char buf[200]; if (len > 199) len = 199;
+    memcpy(buf, s, len); buf[len] = 0;
+    text(g, f, x, y, buf, c);
+  }
+  void drawLabel(Canvas& g, int y, const Msg& M, uint32_t now) {
+    Mascot m; m.cx = 20; m.cy = y + 10; m.s = 0.062f;
+    if (M.pending) { m.look = sinf(now * 0.006f); m.lift = 1.5f * (0.5f + 0.5f * sinf(now * 0.012f)); }
+    else m.eyeOpen = 1 - bump(seg(now % 5000, 4700, 4880));
+    drawMascot(g, m);
+    if (M.pending && M.dispLen == 0) {
+      const char* s = status[0] ? status : (aiSt <= 1 ? "Connecting" : "Searching the web");
+      char b[80]; int dots = (now / 350) % 4;
+      int keep = (int)strlen(s); if (keep > 64) keep = 64;
+      snprintf(b, sizeof(b), "%.*s...", keep, s);
+      while (keep > 4 && textW(g, F_REG, b) > LW - 30) { keep--; snprintf(b, sizeof(b), "%.*s...", keep, s); }
+      if (keep == (int)strlen(s)) snprintf(b, sizeof(b), "%.*s%.*s", keep, s, dots, "...");   // animate only when it fits
+      text(g, F_REG, 36, y + 15, b, C_SOFT);
+    } else {
+      text(g, F_BOLD, 36, y + 15, "Answer", C_WHITE);
+    }
+  }
+  void drawSources(Canvas& g, int y, const Msg& M) {
+    int x = LX; const char* s = M.src; int shown = 0, total = 0;
+    for (const char* p = s; *p; p++) if (*p == '\n') total++;
+    if (*s) total++;
+    while (*s) {
+      const char* e = strchr(s, '\n'); int L = e ? (int)(e - s) : (int)strlen(s);
+      char d[40]; int k = L > 22 ? 22 : L; memcpy(d, s, k); d[k] = 0;
+      int w = textW(g, F_SMALL, d) + 22;
+      if (x + w > LX + LW - (total - shown > 1 ? 28 : 0)) break;
+      rrect(g, x, y + 3, w, 17, 8, C_CARD);
+      g.fillCircle(x + 8, y + 11, 2, C_TEAL);
+      text(g, F_SMALL, x + 14, y + 8, d, C_SOFT);
+      x += w + 5; shown++;
+      s += L; if (*s) s++;
+    }
+    if (total > shown) {
+      char b[16]; snprintf(b, sizeof(b), "+%d", total - shown);
+      int w = textW(g, F_SMALL, b) + 12;
+      rrect(g, x, y + 3, w, 17, 8, C_CARD);
+      text(g, F_SMALL, x + 6, y + 8, b, C_DIM);
+    }
+  }
+  void drawEmpty(Canvas& g, uint32_t now, bool wifiOk) {
+    Mascot m; m.cx = 160; m.cy = 82; m.s = 0.22f;
+    m.lift = 3 * (0.5f + 0.5f * sinf(now * 0.004f));
+    m.look = sinf(now * 0.0013f) * 0.8f;
+    m.eyeOpen = 1 - bump(seg(now % 3600, 3300, 3480));
+    drawMascot(g, m);
+    textC(g, F_BIG, 160, 150, "Ask anything", C_WHITE);
+    if (!apiKey || !apiKey[0]) textC(g, F_SMALL, 160, 166, "ADD AN API KEY: SETTINGS > API KEYS", C_ORANGE);
+    else if (!wifiOk) textC(g, F_SMALL, 160, 166, "CONNECT WIFI: SETTINGS > WIFI", C_ORANGE);
+    else textC(g, F_SMALL, 160, 166, pro ? "PRO SEARCH  -  WEB ANSWERS WITH SOURCES" : "FAST SEARCH  -  WEB ANSWERS WITH SOURCES", C_DIM);
+    textC(g, F_SMALL, 160, 182, "ENTER send   TAB scroll   /new clears", C_DIM);
+  }
+  void drawInputBar(Canvas& g, uint32_t now) {
+    g.fillRect(0, BOT, SW, SH - BOT, C_BG);
+    rrect(g, 8, 205, 304, 30, 15, C_CARD);
+    g.drawRoundRect(8, 205, 304, 30, 15, scrollMode ? C_LINE : blend(C_TEAL, C_CARD, 0.45f));
+    if (scrollMode) {
+      text(g, F_SMALL, 22, 216, "SCROLL: D/X OR ARROWS   TAB TYPE", C_DIM);
+    } else if (!inLen) {
+      text(g, F_REG, 20, 225, busy ? "Answering..." : "Ask anything...", C_DIM);
+      if (!busy && (now / 530) % 2) g.fillRect(19, 211, 2, 18, C_TEAL);
+    } else {
+      // show the end of the text if it is too long
+      const int maxW = 246;
+      const char* s = input; int w = textW(g, F_REG, s);
+      while (w > maxW && *s) { s++; w = textW(g, F_REG, s); }
+      text(g, F_REG, 20, 225, s, C_WHITE);
+      if ((now / 530) % 2) g.fillRect(21 + w, 211, 2, 18, C_TEAL);
+    }
+    // send / stop button
+    int bx = 293, by = 220;
+    if (busy) {
+      g.fillCircle(bx, by, 11, C_LINE);
+      g.fillRect(bx - 4, by - 4, 8, 8, C_WHITE);
+    } else {
+      g.fillCircle(bx, by, 11, inLen ? C_TEAL : C_LINE);
+      uint16_t ac = inLen ? C_BG : C_DIM;
+      g.fillTriangle(bx, by - 6, bx - 5, by - 1, bx + 5, by - 1, ac);
+      g.fillRect(bx - 1, by - 2, 3, 8, ac);
+    }
+  }
+  void draw(Canvas& g, uint32_t now, bool wifiOk) {
+    g.fillScreen(C_BG);
+    if (!ready) { textC(g, F_BOLD, 160, 120, "Not enough memory (PSRAM off?)", C_RED); return; }
+    if (nMsg == 0) drawEmpty(g, now, wifiOk);
+    else {
+      int y = TOP - ir(scrollDraw);
+      for (int i = 0; i < nLines; i++) {
+        const Line& L = lines[i];
+        int h = L.h;
+        if (y + h >= TOP - 4 && y <= BOT) {
+          const Msg* M = L.msg >= 0 ? &msgs[L.msg] : nullptr;
+          switch (L.kind) {
+            case L_Q:    drawSub(g, F_BIG, LX, y + 17, M->raw + L.start, L.len, C_WHITE); break;
+            case L_QS:   drawSub(g, F_BOLD, LX, y + 13, M->raw + L.start, L.len, C_WHITE); break;
+            case L_SRC:  drawSources(g, y, *M); break;
+            case L_LABEL: drawLabel(g, y, *M, now); break;
+            case L_SKEL: {
+              static const int ws[3] = {280, 240, 160};
+              float pulse = 0.5f + 0.5f * sinf(now * 0.006f - L.start * 0.9f);
+              rrect(g, LX, y + 3, ws[L.start % 3], 7, 3, blend(C_CARD, C_LINE, pulse));
+              break;
+            }
+            case L_BODY: drawSub(g, F_REG, LX, y + 13, M->disp + L.start, L.len, rgb(218, 218, 222)); break;
+            case L_HEAD: drawSub(g, F_BOLD, LX, y + 14, M->disp + L.start, L.len, C_WHITE); break;
+            case L_BUL1: g.fillCircle(LX + 4, y + 8, 2, C_TEAL); // fall through
+            case L_BUL:  drawSub(g, F_REG, LX + 14, y + 13, M->disp + L.start, L.len, rgb(218, 218, 222)); break;
+            case L_NOTE: drawSub(g, F_REG, LX, y + 13, M->note + L.start, L.len, M->noteErr ? C_RED : C_ORANGE); break;
+            case L_RULE: g.drawFastHLine(LX, y, LW, C_LINE); break;
+            default: break;
+          }
+        }
+        y += h;
+        if (y > BOT + 30) break;
+      }
+      // scrollbar
+      if (contentH > BOT - TOP) {
+        int vh = BOT - TOP, th = imax(14, vh * vh / contentH);
+        int ty = TOP + (int)((vh - th) * (scrollDraw / (float)imax(1, maxScroll())));
+        rrect(g, 314, ty, 3, th, 1, scrollMode ? C_TEAL : C_LINE);
+      }
+    }
+    drawInputBar(g, now);
+    if (toast[0] && now - toastAt < 3200) {
+      int w = textW(g, F_SMALL, toast) + 20;
+      rrect(g, 160 - w / 2, 180, w, 18, 9, rgb(60, 36, 16));
+      textC(g, F_SMALL, 160, 185, toast, C_ORANGE);
+    }
+  }
+};
 #include <stdio.h>
 
 // Every game follows this shape. update() returns false when the player quits to the menu.
@@ -332,7 +1255,6 @@ struct Game {
     }
   }
 };
-
 
 struct SnakeGame : Game {
   static const int CS = 12, COLS = 26, ROWS = 17, OX = 4, OY = 32;
@@ -407,7 +1329,6 @@ struct SnakeGame : Game {
     drawOverlays(g, now, C_GREEN);
   }
 };
-
 
 // Falling-blocks puzzle (Tetris-style)
 struct BlocksGame : Game {
@@ -581,7 +1502,6 @@ struct BlocksGame : Game {
   }
 };
 
-
 // Classic Pong: you are the left paddle (UP/DOWN), the CPU is on the right. First to 7 wins.
 struct PongGame : Game {
   static const int TOP = 28, BOT = 240, PW = 6, PH = 42, BS = 6, PX = 10, CXP = 304;
@@ -655,7 +1575,6 @@ struct PongGame : Game {
     if (phase == OVER) textC(g, F_BOLD, mid, 48, won ? "You win!" : "CPU wins", won ? C_GREEN : C_RED);
   }
 };
-
 
 struct BreakoutGame : Game {
   static const int COLS = 10, ROWS = 6, BRW = 30, BRH = 10, BX0 = 1, BY0 = 46;
@@ -742,7 +1661,6 @@ struct BreakoutGame : Game {
   }
 };
 
-
 struct FlappyGame : Game {
   static const int GROUND = 218, PIPEW = 36, GAP = 84, NP = 4, SPACING = 140;
   float birdY, vel, scroll, pipeX[NP]; int gapY[NP]; bool passed[NP];
@@ -821,7 +1739,6 @@ struct FlappyGame : Game {
     drawOverlays(g, now, C_YELLOW);
   }
 };
-
 
 struct Game2048 : Game {
   static const int TS = 48, GAPP = 4, GX = 12, GY = 31;
@@ -928,20 +1845,22 @@ struct Game2048 : Game {
   }
 };
 
+#define OS_VERSION "v1.4"
 
-struct MenuItem { const char* name; const char* key; uint16_t color; Icon icon; };
+enum MenuKind : uint8_t { MK_AI, MK_GAME, MK_SETTINGS };
+struct MenuItem { const char* name; const char* key; uint16_t color; Icon icon; MenuKind kind; };
 static const MenuItem MENU[] = {
-  {"Snake",    "snake",    C_GREEN,  IC_SNAKE},
-  {"Blocks",   "blocks",   C_PURPLE, IC_BLOCKS},
-  {"Pong",     "pong",     C_TEAL,   IC_PONG},
-  {"Breakout", "breakout", C_ORANGE, IC_BREAKOUT},
-  {"Flappy",   "flappy",   C_YELLOW, IC_FLAPPY},
-  {"2048",     "2048",     C_PINK,   IC_2048},
-  {"Settings", nullptr,    C_SOFT,   IC_SETTINGS},
-  {"About",    nullptr,    C_SOFT,   IC_ABOUT},
+  {"Ask AI",   nullptr,    C_TEAL,   IC_AI,       MK_AI},
+  {"Snake",    "snake",    C_GREEN,  IC_SNAKE,    MK_GAME},
+  {"Blocks",   "blocks",   C_PURPLE, IC_BLOCKS,   MK_GAME},
+  {"Pong",     "pong",     C_BLUE,   IC_PONG,     MK_GAME},
+  {"Breakout", "breakout", C_ORANGE, IC_BREAKOUT, MK_GAME},
+  {"Flappy",   "flappy",   C_YELLOW, IC_FLAPPY,   MK_GAME},
+  {"2048",     "2048",     C_PINK,   IC_2048,     MK_GAME},
+  {"Settings", nullptr,    C_SOFT,   IC_SETTINGS, MK_SETTINGS},
 };
 static const int N_MENU = sizeof(MENU) / sizeof(MENU[0]);
-static const int N_GAMES = 6;
+static const int FIRST_GAME = 1, N_GAMES = 6;
 
 // Menu grid geometry (4 x 2 tiles, landscape)
 static const int TILE_W = 72, TILE_H = 78, TILE_X0 = 7, TILE_GAP = 6, TILE_Y0 = 48;
@@ -953,6 +1872,17 @@ static const float BM_S = 0.62f, BM_CX = 160, BM_CY = 100;
 static const float BM_W = 248 * BM_S, BM_H = 192 * BM_S;
 static const float BM_TOP = BM_CY + 96 * BM_S - BM_H, BM_LEFT = BM_CX - BM_W / 2;
 static const float BM_BAR_Y = BM_CY + 125 * BM_S, BM_BAR_H = 26 * BM_S, BM_BAR_W = 302 * BM_S;
+
+// WiFi signal bars (bottom-left at x, y)
+static int rssiLevel(int rssi) { return rssi > -55 ? 4 : rssi > -67 ? 3 : rssi > -78 ? 2 : 1; }
+static void drawBars(Canvas& g, int x, int y, int level, uint16_t on, uint16_t off) {
+  for (int i = 0; i < 4; i++) { int h = 3 + i * 3; g.fillRect(x + i * 4, y - h, 3, h, i < level ? on : off); }
+}
+static void drawLock(Canvas& g, int x, int y, uint16_t c, uint16_t bg) {
+  g.fillRoundRect(x, y + 4, 9, 7, 1, c);
+  g.drawRoundRect(x + 2, y, 5, 7, 2, c);
+  g.fillRect(x + 4, y + 6, 1, 3, bg);
+}
 
 static void drawIcon(Canvas& g, Icon ic, int x, int y, uint16_t col) {
   rrect(g, x, y, 34, 34, 9, col);
@@ -983,13 +1913,20 @@ static void drawIcon(Canvas& g, Icon ic, int x, int y, uint16_t col) {
         g.fillCircle(ir(cx + cosf(a) * 9), ir(cy + sinf(a) * 9), 3, k);
       }
       g.fillCircle(cx, cy, 8, k); g.fillCircle(cx, cy, 3, col); break;
+    case IC_AI: {                       // the little computer, with a sparkle
+      Mascot m; m.cx = cx; m.cy = cy - 1; m.s = 0.1f;
+      m.body = k; m.eye = k; m.bg = col;
+      drawMascot(g, m);
+      drawSparkle(g, x + 28, y + 6, 4, C_WHITE);
+      break;
+    }
     case IC_ABOUT:
       g.fillCircle(cx, y + 9, 3, k); g.fillRoundRect(cx - 2, y + 14, 5, 13, 2, k); break;
   }
 }
 
 struct App {
-  enum State { BOOT, INTRO, MENU_S, LAUNCH, GAME, SETTINGS, ABOUT } st = BOOT;
+  enum State { BOOT, INTRO, MENU_S, LAUNCH, GAME, CHAT, SETTINGS, ABOUT, WIFI, KEYS, TEXT } st = BOOT;
   uint32_t t0 = 0;
   int sel = 0;
   float hx = TILE_X0, hy = TILE_Y0;   // gliding highlight position
@@ -998,66 +1935,411 @@ struct App {
   Game* games[N_GAMES];
   Game* cur = nullptr;
   bool showFps = false, flip = false;
-  int setSel = 0; uint32_t resetArmAt = 0, resetDoneAt = 0;
+  bool aiPro = false, shortAns = true, tlsVerify = true;
+  int setSel = 0; float setTop = 0; uint32_t resetArmAt = 0, resetDoneAt = 0;
   uint32_t lastT = 0;
   static const uint32_t BOOT_LEN = 4150;
+  char toast[80] = ""; uint32_t toastAt = 0;
 
   SnakeGame snake; BlocksGame blocks; PongGame pong; BreakoutGame breakout; FlappyGame flappy; Game2048 g2048;
+  Chat chat;
+
+  // ---- saved WiFi networks ----
+  static const int MAX_NETS = 5;
+  struct SavedNet { char ssid[33]; char pass[65]; };
+  SavedNet nets[MAX_NETS]; int nNets = 0;
+  // ---- saved API keys ----
+  static const int MAX_KEYS = 5;
+  struct SavedKey { char label[24]; char val[161]; };
+  SavedKey keys[MAX_KEYS]; int nKeys = 0, activeKey = -1;
+
+  // ---- WiFi screen ----
+  struct FoundNet { char ssid[33]; int rssi; bool open; };
+  static const int MAX_FOUND = 20;
+  FoundNet found[MAX_FOUND]; int nFound = 0;
+  bool wifiScanView = false, scanning = false;
+  int wSel = 0; float wTop = 0;
+  int connPhase = 0;                 // 0 none, 1 connecting, 2 connected, 3 failed
+  uint32_t connAt = 0;
+  char connSsid[33] = "", connPass[65] = ""; bool connSave = false, connOpen = false;
+  int autoPhase = 0; uint32_t autoAt = 0;   // boot / background auto-connect
+
+  // ---- API keys screen ----
+  int kSel = 0; float kTop = 0;
+  char pendingLabel[24] = "";
+
+  // ---- action sheet (small pop-up menu) ----
+  bool sheetOn = false; int sheetN = 0, sheetSel = 0, sheetFor = 0;
+  char sheetTitle[40] = ""; const char* sheetOpt[3] = {};
+
+  // ---- text entry ----
+  enum TePurpose { TE_KEYLABEL, TE_KEYVALUE, TE_WIFIPASS };
+  TePurpose tePurpose = TE_KEYLABEL; State teReturn = SETTINGS;
+  char teTitle[48] = "", teHint[64] = "", teBuf[161] = ""; int teLen = 0, teMax = 160; bool teMono = true;
 
   void begin() {
     games[0] = &snake; games[1] = &blocks; games[2] = &pong;
     games[3] = &breakout; games[4] = &flappy; games[5] = &g2048;
     showFps = plat_loadInt("fps", 0);
     flip = plat_loadInt("flip2", 0);
+    aiPro = plat_loadInt("aipro", 0);
+    shortAns = plat_loadInt("short", 1);
+    tlsVerify = plat_loadInt("tls", 1);
     plat_setFlip(flip);
     loadBests();
+    loadNets();
+    loadKeys();
+    chat.init();
+    if (nNets > 0) { plat_wifiScanStart(); autoPhase = 1; }
+    autoAt = plat_millis();
     t0 = plat_millis();
   }
-  void loadBests() { for (int i = 0; i < N_GAMES; i++) bests[i] = plat_loadInt(MENU[i].key, 0); }
+  void loadBests() { for (int i = 0; i < N_GAMES; i++) bests[i] = plat_loadInt(MENU[FIRST_GAME + i].key, 0); }
   void go(State s, uint32_t now) { st = s; t0 = now; if (s == INTRO) menuAt = now + 700; }
   void openMenu(uint32_t now) { go(MENU_S, now); menuAt = now; }
+  void showToast(const char* s, uint32_t now) { snprintf(toast, sizeof(toast), "%s", s); toastAt = now; }
+
+  // ---------------- storage ----------------
+  void loadNets() {
+    nNets = imin(plat_loadInt("wn", 0), MAX_NETS);
+    char k[16];
+    for (int i = 0; i < nNets; i++) {
+      snprintf(k, sizeof(k), "ws%d", i); plat_loadStr(k, nets[i].ssid, sizeof(nets[i].ssid));
+      snprintf(k, sizeof(k), "wp%d", i); plat_loadStr(k, nets[i].pass, sizeof(nets[i].pass));
+    }
+  }
+  void saveNets() {
+    char k[16];
+    for (int i = 0; i < nNets; i++) {
+      snprintf(k, sizeof(k), "ws%d", i); plat_saveStr(k, nets[i].ssid);
+      snprintf(k, sizeof(k), "wp%d", i); plat_saveStr(k, nets[i].pass);
+    }
+    plat_saveInt("wn", nNets);
+  }
+  int findNet(const char* ssid) { for (int i = 0; i < nNets; i++) if (!strcmp(nets[i].ssid, ssid)) return i; return -1; }
+  void rememberNet(const char* ssid, const char* pass) {       // newest first
+    int i = findNet(ssid);
+    if (i < 0) { i = nNets < MAX_NETS ? nNets++ : MAX_NETS - 1; }
+    for (int j = i; j > 0; j--) nets[j] = nets[j - 1];
+    snprintf(nets[0].ssid, sizeof(nets[0].ssid), "%s", ssid);
+    snprintf(nets[0].pass, sizeof(nets[0].pass), "%s", pass);
+    saveNets();
+  }
+  void forgetNet(int i) {
+    if (i < 0 || i >= nNets) return;
+    for (int j = i; j < nNets - 1; j++) nets[j] = nets[j + 1];
+    nNets--; saveNets();
+  }
+  void loadKeys() {
+    nKeys = imin(plat_loadInt("kn", 0), MAX_KEYS);
+    char k[16];
+    for (int i = 0; i < nKeys; i++) {
+      snprintf(k, sizeof(k), "kl%d", i); plat_loadStr(k, keys[i].label, sizeof(keys[i].label));
+      snprintf(k, sizeof(k), "kv%d", i); plat_loadStr(k, keys[i].val, sizeof(keys[i].val));
+    }
+    activeKey = plat_loadInt("ka", nKeys ? 0 : -1);
+    if (activeKey >= nKeys) activeKey = nKeys ? 0 : -1;
+  }
+  void saveKeys() {
+    char k[16];
+    for (int i = 0; i < nKeys; i++) {
+      snprintf(k, sizeof(k), "kl%d", i); plat_saveStr(k, keys[i].label);
+      snprintf(k, sizeof(k), "kv%d", i); plat_saveStr(k, keys[i].val);
+    }
+    plat_saveInt("kn", nKeys);
+    plat_saveInt("ka", activeKey);
+  }
+  static void maskKey(const char* v, char* out, int max) {     // "pplx-AbC...wxyz"
+    int n = (int)strlen(v);
+    if (n <= 12) snprintf(out, max, "%.*s...", n > 4 ? 4 : n, v);
+    else snprintf(out, max, "%.8s...%s", v, v + n - 4);
+  }
+
+  // ---------------- WiFi helpers ----------------
+  bool wifiOk() { return plat_wifiState() == 2; }
+  void connectTo(const char* ssid, const char* pass, bool save, bool open, uint32_t now) {
+    char s2[33], p2[65];                               // copy first: ssid/pass may point at connSsid/connPass
+    snprintf(s2, sizeof(s2), "%s", ssid);
+    snprintf(p2, sizeof(p2), "%s", pass);
+    memcpy(connSsid, s2, sizeof(s2));
+    memcpy(connPass, p2, sizeof(p2));
+    connSave = save; connOpen = open;
+    autoPhase = 0;
+    plat_wifiConnect(connSsid, connPass);
+    connPhase = 1; connAt = now;
+  }
+  const char* reasonText() {
+    int r = plat_wifiReason();
+    if (r == 201 || r == 210 || r == 211) return "Network not found. Move closer?";
+    if (r == 212) return "Signal too weak.";
+    if (r == 2 || r == 15 || r == 202 || r == 204) return "Wrong password?";
+    return "Could not connect.";
+  }
+  // runs every frame: background auto-connect to the strongest saved network
+  void netTick(uint32_t now) {
+    if (connPhase == 1) {
+      int s = plat_wifiState();
+      if (s == 2) { connPhase = 2; connAt = now; if (connSave) rememberNet(connSsid, connPass); }
+      else if (s == 3) { connPhase = 3; connAt = now; }
+    }
+    if (autoPhase == 1 && !scanning) {
+      int n = plat_wifiScanCount();
+      if (n >= 0) {
+        int best = -1, bestRssi = -999;
+        for (int i = 0; i < n; i++) {
+          char ss[33]; int rssi, open;
+          plat_wifiScanGet(i, ss, sizeof(ss), &rssi, &open);
+          int k = findNet(ss);
+          if (k >= 0 && rssi > bestRssi) { best = k; bestRssi = rssi; }
+        }
+        if (best >= 0) { plat_wifiConnect(nets[best].ssid, nets[best].pass); autoPhase = 2; }
+        else autoPhase = 3;
+        autoAt = now;
+      } else if (n == -2) { autoPhase = 3; autoAt = now; }
+    } else if (autoPhase == 2) {
+      int s = plat_wifiState();
+      if (s == 2 || s == 3) { autoPhase = 3; autoAt = now; }
+    }
+    // retry every 60 s while disconnected (not while the WiFi screen is busy)
+    if ((autoPhase == 3 || autoPhase == 0) && nNets > 0 && connPhase != 1 && !scanning && st != WIFI &&
+        now - autoAt > 60000 && (plat_wifiState() == 0 || plat_wifiState() == 3) && !chat.busy) {
+      plat_wifiScanStart(); autoPhase = 1; autoAt = now;
+    }
+  }
 
   // ---------------- update ----------------
   void update(Input& in, uint32_t now) {
     uint32_t dt = lastT ? now - lastT : 16; if (dt > 50) dt = 50; lastT = now;
     uint32_t t = now - t0;
-    switch (st) {
+    in.textMode = false;
+    netTick(now);
+    if (sheetOn) { updateSheet(in, now); }
+    else switch (st) {
       case BOOT:  if (t > BOOT_LEN || (t > 400 && in.anyPressed)) go(INTRO, now); break;
       case INTRO: if (t > 1100) go(MENU_S, now); break;
       case MENU_S: updateMenu(in, now); break;
-      case LAUNCH: if (t > 480) { cur = games[sel]; cur->begin(); go(GAME, now); } break;
+      case LAUNCH:
+        if (t > 480) {
+          if (MENU[sel].kind == MK_AI) { chat.enter(); go(CHAT, now); }
+          else { cur = games[sel - FIRST_GAME]; cur->begin(); go(GAME, now); }
+        }
+        break;
       case GAME:  if (!cur->update(in, now, dt)) { loadBests(); openMenu(now); } break;
+      case CHAT:
+        chat.apiKey = activeKey >= 0 ? keys[activeKey].val : "";
+        chat.pro = aiPro; chat.shortAnswers = shortAns; chat.verifyTls = tlsVerify;
+        if (!chat.update(in, now, dt)) openMenu(now);
+        break;
       case SETTINGS: updateSettings(in, now); break;
-      case ABOUT: if (in.pressed[B_B] || in.pressed[B_A]) openMenu(now); break;
+      case ABOUT: if (in.pressed[B_B] || in.pressed[B_A]) go(SETTINGS, now); break;
+      case WIFI: updateWifi(in, now); break;
+      case KEYS: updateKeys(in, now); break;
+      case TEXT: updateText(in, now); break;
     }
+    // keep text mode on while typing so the next key report types
+    if (st == TEXT && !sheetOn) in.textMode = true;
+    if (st == CHAT && !sheetOn) in.textMode = !chat.scrollMode;
     float k = 1 - powf(0.0005f, dt / 1000.0f * 1.6f);
     hx = lerpf(hx, tileX(sel), k);
     hy = lerpf(hy, tileY(sel), k);
+    setTop = lerpf(setTop, listTopFor(setSel, 10, setTop, 4), k);
+    wTop = lerpf(wTop, listTopFor(wSel, wifiRowCount(), wTop, 3), k);
+    kTop = lerpf(kTop, listTopFor(kSel, keyRowCount(), kTop, 4), k);
+  }
+  // first visible row so that sel stays on screen (4 rows visible)
+  static float listTopFor(int sel, int n, float top, int VIS) {
+    int t = ir(top);
+    if (sel < t) t = sel;
+    if (sel > t + VIS - 1) t = sel - VIS + 1;
+    if (t > n - VIS) t = n - VIS;
+    if (t < 0) t = 0;
+    return (float)t;
   }
   void updateMenu(Input& in, uint32_t now) {
     if (in.rep[B_LEFT])  sel = (sel + N_MENU - 1) % N_MENU;
     if (in.rep[B_RIGHT]) sel = (sel + 1) % N_MENU;
     if (in.rep[B_UP] || in.rep[B_DOWN]) sel = (sel + 4) % N_MENU;
     if (in.pressed[B_A]) {
-      if (sel < N_GAMES) go(LAUNCH, now);
-      else if (sel == N_GAMES) { setSel = 0; resetArmAt = resetDoneAt = 0; go(SETTINGS, now); }
-      else go(ABOUT, now);
+      if (MENU[sel].kind == MK_SETTINGS) { setSel = 0; setTop = 0; resetArmAt = resetDoneAt = 0; go(SETTINGS, now); }
+      else go(LAUNCH, now);
     }
   }
+
+  // ---- action sheet ----
+  void openSheet(const char* title, int forWhat, const char* a, const char* b, const char* c) {
+    snprintf(sheetTitle, sizeof(sheetTitle), "%s", title);
+    sheetOpt[0] = a; sheetOpt[1] = b; sheetOpt[2] = c;
+    sheetN = c ? 3 : (b ? 2 : 1); sheetSel = 0; sheetFor = forWhat; sheetOn = true;
+  }
+  void updateSheet(Input& in, uint32_t now) {
+    if (in.rep[B_UP]) sheetSel = (sheetSel + sheetN - 1) % sheetN;
+    if (in.rep[B_DOWN]) sheetSel = (sheetSel + 1) % sheetN;
+    if (in.pressed[B_B]) { sheetOn = false; return; }
+    if (!in.pressed[B_A]) return;
+    sheetOn = false;
+    if (st == WIFI) {                                   // saved network: Connect / Forget / Cancel
+      int i = sheetFor;
+      if (sheetSel == 0 && i < nNets) connectTo(nets[i].ssid, nets[i].pass, true, !nets[i].pass[0], now);
+      else if (sheetSel == 1) { forgetNet(i); wSel = 0; showToast("Network forgotten", now); }
+    } else if (st == KEYS) {                            // key: Use / Delete / Cancel
+      int i = sheetFor;
+      if (sheetSel == 0 && i < nKeys) { activeKey = i; saveKeys(); showToast("Key in use", now); }
+      else if (sheetSel == 1 && i < nKeys) {
+        for (int j = i; j < nKeys - 1; j++) keys[j] = keys[j + 1];
+        nKeys--;
+        if (activeKey == i) activeKey = nKeys ? 0 : -1;
+        else if (activeKey > i) activeKey--;
+        saveKeys(); kSel = 0; showToast("Key deleted", now);
+      }
+    }
+  }
+
+  // ---- settings ----
   void updateSettings(Input& in, uint32_t now) {
-    const int N = 4;
+    const int N = 10;
     if (in.rep[B_UP]) setSel = (setSel + N - 1) % N;
     if (in.rep[B_DOWN]) setSel = (setSel + 1) % N;
     if (in.pressed[B_B] || in.pressed[B_LEFT]) { openMenu(now); return; }
-    if (in.pressed[B_A]) {
-      if (setSel == 0) { flip = !flip; plat_saveInt("flip2", flip); plat_setFlip(flip); }
-      else if (setSel == 1) { showFps = !showFps; plat_saveInt("fps", showFps); }
-      else if (setSel == 3) {
+    if (!in.pressed[B_A] && !in.pressed[B_RIGHT]) return;
+    bool enter = in.pressed[B_A];
+    switch (setSel) {
+      case 0: wifiScanView = false; wSel = 0; wTop = 0; go(WIFI, now); break;
+      case 1: kSel = 0; kTop = 0; go(KEYS, now); break;
+      case 2: aiPro = !aiPro; plat_saveInt("aipro", aiPro); break;
+      case 3: if (enter) { shortAns = !shortAns; plat_saveInt("short", shortAns); } break;
+      case 4: if (enter) { tlsVerify = !tlsVerify; plat_saveInt("tls", tlsVerify); } break;
+      case 5: if (enter) { flip = !flip; plat_saveInt("flip2", flip); plat_setFlip(flip); } break;
+      case 6: if (enter) { showFps = !showFps; plat_saveInt("fps", showFps); } break;
+      case 8:
+        if (!enter) break;
         if (resetArmAt && now - resetArmAt < 3000) {
-          for (int i = 0; i < N_GAMES; i++) plat_saveInt(MENU[i].key, 0);
+          for (int i = 0; i < N_GAMES; i++) plat_saveInt(MENU[FIRST_GAME + i].key, 0);
           loadBests(); resetArmAt = 0; resetDoneAt = now;
         } else resetArmAt = now;
+        break;
+      case 9: go(ABOUT, now); break;
+    }
+  }
+
+  // ---- WiFi screen ----
+  // main view rows: 0 = "Scan for networks", 1.. = saved networks
+  // scan view rows: found networks
+  int wifiRowCount() { return wifiScanView ? imax(nFound, 1) : 1 + nNets; }
+  void startScan() {
+    plat_wifiScanStart(); scanning = true; nFound = 0; wifiScanView = true; wSel = 0; wTop = 0;
+    if (autoPhase == 1) autoPhase = 3;
+  }
+  void collectScan() {
+    int n = plat_wifiScanCount();
+    if (n == -1) return;
+    scanning = false;
+    nFound = 0;
+    for (int i = 0; i < n && nFound < MAX_FOUND; i++) {
+      FoundNet f; int open;
+      plat_wifiScanGet(i, f.ssid, sizeof(f.ssid), &f.rssi, &open);
+      f.open = open != 0;
+      if (!f.ssid[0]) continue;                          // hidden network
+      bool dup = false;
+      for (int j = 0; j < nFound; j++) if (!strcmp(found[j].ssid, f.ssid)) { dup = true; if (f.rssi > found[j].rssi) found[j].rssi = f.rssi; }
+      if (!dup) found[nFound++] = f;
+    }
+    // strongest first
+    for (int a = 1; a < nFound; a++) for (int b = a; b > 0 && found[b].rssi > found[b - 1].rssi; b--) { FoundNet t = found[b]; found[b] = found[b - 1]; found[b - 1] = t; }
+  }
+  void openText(TePurpose p, State ret, const char* title, const char* hint, const char* init, int maxLen, bool mono) {
+    tePurpose = p; teReturn = ret;
+    snprintf(teTitle, sizeof(teTitle), "%s", title);
+    snprintf(teHint, sizeof(teHint), "%s", hint);
+    snprintf(teBuf, sizeof(teBuf), "%s", init);
+    teLen = (int)strlen(teBuf); teMax = maxLen; teMono = mono;
+    go(TEXT, plat_millis());
+  }
+  void updateWifi(Input& in, uint32_t now) {
+    if (scanning) collectScan();
+    if (connPhase == 1) { if (in.pressed[B_B]) { plat_wifiDisconnect(); connPhase = 0; } return; }
+    if (connPhase == 2) { if (now - connAt > 1300 || in.pressed[B_A] || in.pressed[B_B]) { connPhase = 0; wifiScanView = false; wSel = 0; } return; }
+    if (connPhase == 3) {
+      if (in.pressed[B_B]) connPhase = 0;
+      else if (in.pressed[B_A]) {
+        connPhase = 0;
+        if (!connOpen) openText(TE_WIFIPASS, WIFI, connSsid, "WIFI PASSWORD (CASE SENSITIVE)", connPass, 64, true);
+        else connectTo(connSsid, "", connSave, true, now);
       }
+      return;
+    }
+    int n = wifiRowCount();
+    if (in.rep[B_UP]) wSel = (wSel + n - 1) % n;
+    if (in.rep[B_DOWN]) wSel = (wSel + 1) % n;
+    if (in.pressed[B_B] || in.pressed[B_LEFT]) {
+      if (wifiScanView) { wifiScanView = false; wSel = 0; wTop = 0; }
+      else go(SETTINGS, now);
+      return;
+    }
+    if (!in.pressed[B_A]) return;
+    if (!wifiScanView) {
+      if (wSel == 0) startScan();
+      else openSheet(nets[wSel - 1].ssid, wSel - 1, "Connect", "Forget", "Cancel");
+    } else if (!scanning && nFound > 0) {
+      FoundNet& f = found[wSel];
+      int k = findNet(f.ssid);
+      if (k >= 0) connectTo(nets[k].ssid, nets[k].pass, true, f.open, now);
+      else if (f.open) connectTo(f.ssid, "", true, true, now);
+      else { snprintf(connSsid, sizeof(connSsid), "%s", f.ssid); connOpen = false;
+             openText(TE_WIFIPASS, WIFI, f.ssid, "WIFI PASSWORD (CASE SENSITIVE)", "", 64, true); }
+    } else if (!scanning) startScan();
+  }
+
+  // ---- API keys screen ----
+  int keyRowCount() { return nKeys + (nKeys < MAX_KEYS ? 1 : 0); }
+  void updateKeys(Input& in, uint32_t now) {
+    int n = keyRowCount();
+    if (in.rep[B_UP]) kSel = (kSel + n - 1) % n;
+    if (in.rep[B_DOWN]) kSel = (kSel + 1) % n;
+    if (in.pressed[B_B] || in.pressed[B_LEFT]) { go(SETTINGS, now); return; }
+    if (!in.pressed[B_A]) return;
+    if (kSel < nKeys) openSheet(keys[kSel].label, kSel, activeKey == kSel ? "In use" : "Use this key", "Delete", "Cancel");
+    else {
+      char def[24]; snprintf(def, sizeof(def), "Key %d", nKeys + 1);
+      openText(TE_KEYLABEL, KEYS, "Name this key", "A SHORT NAME, E.G. MY KEY", def, 20, false);
+    }
+  }
+
+  // ---- text entry ----
+  void updateText(Input& in, uint32_t now) {
+    in.textMode = true;
+    char c;
+    while ((c = in.getChar()) != 0) {
+      if (c == '\b') { if (teLen) teBuf[--teLen] = 0; }
+      else if (teLen < teMax) { teBuf[teLen++] = c; teBuf[teLen] = 0; }
+    }
+    if (in.pressed[B_B]) { in.textMode = false; in.clearChars(); go(teReturn, now); return; }
+    if (!in.pressed[B_A]) return;
+    // trim spaces at the ends (keys and names)
+    if (tePurpose != TE_WIFIPASS) {
+      while (teLen && teBuf[teLen - 1] == ' ') teBuf[--teLen] = 0;
+      int s = 0; while (teBuf[s] == ' ') s++;
+      if (s) { memmove(teBuf, teBuf + s, teLen - s + 1); teLen -= s; }
+    }
+    switch (tePurpose) {
+      case TE_KEYLABEL:
+        snprintf(pendingLabel, sizeof(pendingLabel), "%.23s", teLen ? teBuf : "My key");
+        openText(TE_KEYVALUE, KEYS, "Type your API key", "STARTS WITH pplx-   CHECK EVERY CHARACTER", "", 160, true);
+        break;
+      case TE_KEYVALUE:
+        if (teLen < 20) { showToast("That key looks too short", now); return; }
+        if (nKeys >= MAX_KEYS) { showToast("5 keys max. Delete one first", now); return; }
+        snprintf(keys[nKeys].label, sizeof(keys[nKeys].label), "%s", pendingLabel);
+        snprintf(keys[nKeys].val, sizeof(keys[nKeys].val), "%s", teBuf);
+        activeKey = nKeys; nKeys++;
+        saveKeys();
+        showToast(strncmp(teBuf, "pplx-", 5) ? "Saved. Note: Perplexity keys start with pplx-" : "Key saved and in use", now);
+        kSel = activeKey; in.clearChars(); go(KEYS, now);
+        break;
+      case TE_WIFIPASS:
+        in.clearChars();
+        go(WIFI, now);
+        connectTo(connSsid, teBuf, true, false, now);
+        break;
     }
   }
 
@@ -1070,8 +2352,18 @@ struct App {
       case MENU_S: drawMenu(g, now, true); break;
       case LAUNCH: drawLaunch(g, t, now); break;
       case GAME:   cur->draw(g, now); break;
+      case CHAT:   chat.draw(g, now, wifiOk()); drawMiniHeader(g, now, "Ask"); break;
       case SETTINGS: drawSettings(g, now); break;
       case ABOUT:  drawAbout(g, now); break;
+      case WIFI:   drawWifi(g, now); break;
+      case KEYS:   drawKeys(g, now); break;
+      case TEXT:   drawText(g, now); break;
+    }
+    if (sheetOn) drawSheet(g);
+    if (toast[0] && now - toastAt < 2600 && st != GAME) {
+      int w = textW(g, F_SMALL, toast) + 22;
+      rrect(g, 160 - w / 2, 190, w, 20, 10, C_WHITE);
+      textC(g, F_SMALL, 160, 196, toast, C_BG);
     }
   }
 
@@ -1197,6 +2489,22 @@ struct App {
     name[n] = 0;
     textC(g, F_SMALL, x + TILE_W / 2, y + 56, name, selected ? C_BG : C_WHITE);
   }
+  // WiFi + keyboard status pills (top right)
+  void drawStatus(Canvas& g, uint32_t now, int y) {
+    int ws = plat_wifiState();
+    bool blinkOn = (now / 300) % 2;
+    rrect(g, 222, y, 34, 20, 10, C_CARD);
+    if (ws == 2) {
+      char ss[33], ip[20]; int rssi = -90;
+      plat_wifiInfo(ss, sizeof(ss), ip, sizeof(ip), &rssi);
+      drawBars(g, 232, y + 15, rssiLevel(rssi), C_WHITE, C_LINE);
+    } else drawBars(g, 232, y + 15, 4, ws == 1 ? (blinkOn ? C_YELLOW : C_LINE) : C_LINE, C_LINE);
+    int ks = plat_kbState();
+    uint16_t dc = ks == 3 ? C_GREEN : (ks == 0 ? C_DIM : (blinkOn ? C_YELLOW : C_BG));
+    rrect(g, 262, y, 48, 20, 10, C_CARD);
+    g.fillCircle(274, y + 10, 4, dc);
+    text(g, F_SMALL, 284, y + 6, "KB", ks == 3 ? C_WHITE : C_DIM);
+  }
   void drawHeader(Canvas& g, uint32_t now, const char* title) {
     g.fillRect(0, 0, SW, 42, C_BG);
     Mascot m; m.cx = 22; m.cy = 18; m.s = 0.1f;
@@ -1204,13 +2512,26 @@ struct App {
     float sw = sinf(now * 0.0011f);
     m.look = sw > 0.6f ? 1 : (sw < -0.6f ? -1 : 0);
     drawMascot(g, m);
-    text(g, F_BIG, 42, 29, title, C_WHITE);
-    int ks = plat_kbState();
-    uint16_t dc = ks == 3 ? C_GREEN : (ks == 0 ? C_DIM : ((now / 300) % 2 ? C_YELLOW : C_BG));
-    rrect(g, 262, 10, 48, 20, 10, C_CARD);
-    g.fillCircle(274, 20, 4, dc);
-    text(g, F_SMALL, 284, 16, "KB", ks == 3 ? C_WHITE : C_DIM);
+    char t[48]; snprintf(t, sizeof(t), "%s", title);
+    int n = (int)strlen(t);
+    if (textW(g, F_BIG, t) > 172) {                    // too long: shorten with ".."
+      while (n > 1) { t[--n] = 0; char tt[52]; snprintf(tt, sizeof(tt), "%s..", t); if (textW(g, F_BIG, tt) <= 172) { strcpy(t, tt); break; } }
+    }
+    text(g, F_BIG, 42, 29, t, C_WHITE);
+    drawStatus(g, now, 10);
     g.drawFastHLine(10, 39, 300, C_LINE);
+  }
+  // compact header for the chat (more room for text)
+  void drawMiniHeader(Canvas& g, uint32_t now, const char* title) {
+    g.fillRect(0, 0, SW, 32, C_BG);
+    Mascot m; m.cx = 18; m.cy = 14; m.s = 0.075f;
+    m.eyeOpen = 1 - bump(seg(now % 4200, 3900, 4100));
+    if (chat.busy) m.look = sinf(now * 0.006f);
+    drawMascot(g, m);
+    text(g, F_BOLD, 34, 21, title, C_WHITE);
+    if (aiPro) { rrect(g, 70, 8, 30, 16, 8, blend(C_TEAL, C_BG, 0.6f)); text(g, F_SMALL, 76, 12, "PRO", C_TEAL); }
+    drawStatus(g, now, 5);
+    g.drawFastHLine(0, 31, SW, C_LINE);
   }
   void drawFooter(Canvas& g, const char* left, const char* right) {
     g.fillRect(0, 216, SW, SH - 216, C_BG);
@@ -1234,9 +2555,13 @@ struct App {
       drawTileContent(g, i, x, y, isSel);
     }
     drawHeader(g, now, "Arcade");
-    char left[32];
-    if (sel < N_GAMES) { if (bests[sel]) snprintf(left, sizeof(left), "%s   BEST %d", MENU[sel].name, bests[sel]); else snprintf(left, sizeof(left), "%s   NEW", MENU[sel].name); }
-    else snprintf(left, sizeof(left), "%s", MENU[sel].name);
+    char left[40];
+    if (MENU[sel].kind == MK_GAME) {
+      int b = bests[sel - FIRST_GAME];
+      if (b) snprintf(left, sizeof(left), "%s   BEST %d", MENU[sel].name, b); else snprintf(left, sizeof(left), "%s   NEW", MENU[sel].name);
+    } else if (MENU[sel].kind == MK_AI) {
+      snprintf(left, sizeof(left), "Ask AI   %s", activeKey < 0 ? "NO KEY" : (wifiOk() ? "ONLINE" : "NO WIFI"));
+    } else snprintf(left, sizeof(left), "%s", MENU[sel].name);
     drawFooter(g, left, "DXZC move   ENTER open");
   }
   void drawLaunch(Canvas& g, uint32_t t, uint32_t now) {
@@ -1248,34 +2573,253 @@ struct App {
     if (nk > 0) textC(g, F_HUGE, SW / 2, ir(132 + 12 * (1 - easeOutCubic(nk))), MENU[sel].name, blend(c, C_BG, nk));
   }
 
-  // ======== Settings ========
+  // ======== Lists (settings, WiFi, keys) ========
   void toggle(Canvas& g, int x, int y, bool on) {
     rrect(g, x, y, 36, 18, 9, on ? C_TEAL : C_LINE);
     g.fillCircle(on ? x + 27 : x + 9, y + 9, 7, C_WHITE);
   }
+  void chevron(Canvas& g, int x, int y, uint16_t c) {
+    g.drawLine(x, y - 4, x + 4, y, c); g.drawLine(x + 4, y, x, y + 4, c);
+    g.drawLine(x + 1, y - 4, x + 5, y, c); g.drawLine(x + 5, y, x + 1, y + 4, c);
+  }
+  // one list row; returns the sub-text colour to use for extras
+  void row(Canvas& g, int y, const char* title, const char* sub, bool s, uint16_t subCol) {
+    rrect(g, 10, y, 300, 36, 10, s ? C_WHITE : C_CARD);
+    text(g, F_BOLD, 22, y + 17, title, s ? C_BG : C_WHITE);
+    text(g, F_SMALL, 22, y + 23, sub, subCol ? subCol : (s ? rgb(90, 90, 96) : C_DIM));
+  }
+  void scrollHint(Canvas& g, float top, int n, int vis, int y0, int h) {
+    if (n <= vis) return;
+    int th = imax(12, h * vis / n);
+    int ty = y0 + ir((h - th) * top / (float)(n - vis));
+    rrect(g, 314, ty, 3, th, 1, C_LINE);
+  }
   void drawSettings(Canvas& g, uint32_t now) {
     g.fillScreen(C_BG);
-    const char* names[4] = {"Flip screen", "Show FPS", "Keyboard", "Reset scores"};
+    static const char* names[10] = {"WiFi", "API keys", "AI mode", "Short answers", "Secure connection",
+                                    "Flip screen", "Show FPS", "Keyboard", "Reset scores", "About"};
     int ks = plat_kbState();
     bool armed = resetArmAt && now - resetArmAt < 3000;
-    for (int i = 0; i < 4; i++) {
-      int y = 46 + i * 42;
+    char sub[48];
+    for (int i = 0; i < 10; i++) {
+      int y = 46 + ir((i - setTop) * 42);
+      if (y < 4 || y > 214) continue;
       bool s = i == setSel;
-      rrect(g, 10, y, 300, 36, 10, s ? C_WHITE : C_CARD);
-      uint16_t tc = s ? C_BG : C_WHITE, sc = s ? rgb(90, 90, 96) : C_DIM;
-      text(g, F_BOLD, 22, y + 17, names[i], tc);
-      const char* sub = "";
-      if (i == 0) sub = "USE IF THE PICTURE IS UPSIDE DOWN";
-      if (i == 1) sub = showFps ? "ON" : "OFF";
-      if (i == 2) sub = ks == 3 ? "CARDKB2 CONNECTED" : ks == 2 ? "PAIRED" : ks == 1 ? "CONNECTING..." : "SEARCHING...";
-      if (i == 3) sub = resetDoneAt && now - resetDoneAt < 2000 ? "SCORES CLEARED" : (armed ? "PRESS AGAIN TO CONFIRM" : "CLEARS ALL BEST SCORES");
-      text(g, F_SMALL, 22, y + 23, sub, (i == 3 && armed) ? C_RED : sc);
-      if (i == 0) toggle(g, 262, y + 9, flip);
-      if (i == 1) toggle(g, 262, y + 9, showFps);
-      if (i == 2) g.fillCircle(280, y + 18, 5, ks == 3 ? C_GREEN : C_DIM);
+      uint16_t subCol = 0;
+      sub[0] = 0;
+      switch (i) {
+        case 0: {
+          int w = plat_wifiState();
+          if (w == 2) { char ss[33], ip[20]; int r; plat_wifiInfo(ss, sizeof(ss), ip, sizeof(ip), &r); snprintf(sub, sizeof(sub), "CONNECTED: %.24s", ss); }
+          else snprintf(sub, sizeof(sub), "%s", w == 1 ? "CONNECTING..." : (nNets ? "NOT CONNECTED" : "NO NETWORKS SAVED"));
+          break;
+        }
+        case 1: if (activeKey >= 0) snprintf(sub, sizeof(sub), "IN USE: %.30s", keys[activeKey].label); else { snprintf(sub, sizeof(sub), "NO KEY YET - ADD ONE"); subCol = C_ORANGE; } break;
+        case 2: snprintf(sub, sizeof(sub), "%s", aiPro ? "PRO: DEEPER RESEARCH, COSTS MORE" : "FAST: QUICK WEB ANSWERS"); break;
+        case 3: snprintf(sub, sizeof(sub), "%s", shortAns ? "FITS THE SMALL SCREEN" : "FULL-LENGTH ANSWERS"); break;
+        case 4: snprintf(sub, sizeof(sub), "%s", tlsVerify ? "VERIFIES THE API SERVER" : "NOT VERIFIED - LESS SAFE"); if (!tlsVerify) subCol = C_ORANGE; break;
+        case 5: snprintf(sub, sizeof(sub), "USE IF THE PICTURE IS UPSIDE DOWN"); break;
+        case 6: snprintf(sub, sizeof(sub), "%s", showFps ? "ON" : "OFF"); break;
+        case 7: snprintf(sub, sizeof(sub), "%s", ks == 3 ? "CARDKB2 CONNECTED" : ks == 2 ? "PAIRED" : ks == 1 ? "CONNECTING..." : "SEARCHING..."); break;
+        case 8: snprintf(sub, sizeof(sub), "%s", resetDoneAt && now - resetDoneAt < 2000 ? "SCORES CLEARED" : (armed ? "PRESS AGAIN TO CONFIRM" : "CLEARS ALL BEST SCORES")); if (armed) subCol = C_RED; break;
+        case 9: snprintf(sub, sizeof(sub), "ARCADE OS %s", OS_VERSION); break;
+      }
+      row(g, y, names[i], sub, s, subCol);
+      uint16_t acc = s ? C_BG : C_SOFT;
+      switch (i) {
+        case 0: case 1: case 9: chevron(g, 290, y + 18, acc); break;
+        case 2: {
+          const char* v = aiPro ? "PRO" : "FAST";
+          int w = textW(g, F_SMALL, v) + 16;
+          rrect(g, 298 - w, y + 9, w, 18, 9, s ? C_BG : C_LINE);
+          text(g, F_SMALL, 306 - w, y + 14, v, s ? C_WHITE : C_WHITE);
+          break;
+        }
+        case 3: toggle(g, 262, y + 9, shortAns); break;
+        case 4: toggle(g, 262, y + 9, tlsVerify); break;
+        case 5: toggle(g, 262, y + 9, flip); break;
+        case 6: toggle(g, 262, y + 9, showFps); break;
+        case 7: g.fillCircle(280, y + 18, 5, ks == 3 ? C_GREEN : C_DIM); break;
+      }
     }
+    scrollHint(g, setTop, 10, 4, 46, 162);
     drawHeader(g, now, "Settings");
     drawFooter(g, "", "ENTER select   ESC back");
+  }
+
+  // ======== WiFi ========
+  void spinner(Canvas& g, int cx, int cy, uint32_t now, uint16_t c) {
+    for (int i = 0; i < 8; i++) {
+      float a = i * 3.14159f / 4 + now * 0.008f;
+      g.fillCircle(ir(cx + cosf(a) * 9), ir(cy + sinf(a) * 9), i < 3 ? 2 : 1, blend(c, C_BG, i / 9.0f));
+    }
+  }
+  void drawWifi(Canvas& g, uint32_t now) {
+    g.fillScreen(C_BG);
+    // status card
+    int ws = plat_wifiState();
+    rrect(g, 10, 46, 300, 38, 10, C_CARD);
+    char ss[33] = "", ip[20] = ""; int rssi = -90;
+    if (ws == 2) {
+      plat_wifiInfo(ss, sizeof(ss), ip, sizeof(ip), &rssi);
+      drawBars(g, 22, 72, rssiLevel(rssi), C_GREEN, C_LINE);
+      char b[48]; snprintf(b, sizeof(b), "%.26s", ss);
+      text(g, F_BOLD, 46, 63, b, C_WHITE);
+      snprintf(b, sizeof(b), "CONNECTED   %s   %d dBm", ip, rssi);
+      text(g, F_SMALL, 46, 70, b, C_GREEN);
+    } else {
+      drawBars(g, 22, 72, 4, ws == 1 ? C_YELLOW : C_LINE, C_LINE);
+      text(g, F_BOLD, 46, 63, ws == 1 ? "Connecting..." : "Not connected", C_WHITE);
+      text(g, F_SMALL, 46, 70, nNets ? "PICK A SAVED NETWORK OR SCAN" : "SCAN AND PICK YOUR NETWORK", C_DIM);
+    }
+    // list
+    int n = wifiRowCount();
+    for (int i = 0; i < n; i++) {
+      int y = 92 + ir((i - wTop) * 40);
+      if (y < 50 || y > 200) continue;
+      bool s = i == wSel;
+      if (!wifiScanView) {
+        if (i == 0) {
+          row(g, y, "Scan for networks", nNets ? "FIND A NEW NETWORK" : "START HERE", s, 0);
+          chevron(g, 290, y + 18, s ? C_BG : C_SOFT);
+        } else {
+          SavedNet& sn = nets[i - 1];
+          bool isCur = ws == 2 && !strcmp(ss, sn.ssid);
+          row(g, y, sn.ssid, isCur ? "SAVED  -  CONNECTED" : "SAVED  -  ENTER FOR OPTIONS", s, isCur ? C_GREEN : 0);
+        }
+      } else {
+        if (scanning) {
+          if (i == 0) { rrect(g, 10, y, 300, 36, 10, C_CARD); spinner(g, 30, y + 18, now, C_TEAL); text(g, F_BOLD, 48, y + 23, "Scanning...", C_WHITE); }
+          continue;
+        }
+        if (nFound == 0) { row(g, y, "No networks found", "ENTER TO SCAN AGAIN", s, 0); continue; }
+        FoundNet& f = found[i];
+        char sub[40];
+        snprintf(sub, sizeof(sub), "%s%s", f.open ? "OPEN" : "SECURED", findNet(f.ssid) >= 0 ? "  -  SAVED" : "");
+        row(g, y, f.ssid, sub, s, 0);
+        drawBars(g, 284, y + 26, rssiLevel(f.rssi), s ? C_BG : C_WHITE, s ? rgb(190, 190, 196) : C_LINE);
+        if (!f.open) drawLock(g, 268, y + 14, s ? C_BG : C_SOFT, s ? C_WHITE : C_CARD);
+      }
+    }
+    scrollHint(g, wTop, n, 3, 92, 118);
+    drawHeader(g, now, "WiFi");
+    drawFooter(g, wifiScanView ? "PICK YOUR NETWORK" : "", "ENTER select   ESC back");
+    // connecting / result pop-up
+    if (connPhase) {
+      dimScreen(g);
+      rrect(g, 40, 70, 240, 100, 14, C_CARD);
+      g.drawRoundRect(40, 70, 240, 100, 14, connPhase == 3 ? C_RED : (connPhase == 2 ? C_GREEN : C_LINE));
+      char b[48]; snprintf(b, sizeof(b), "%.24s", connSsid);
+      if (connPhase == 1) {
+        spinner(g, 160, 98, now, C_TEAL);
+        textC(g, F_BOLD, 160, 132, b, C_WHITE);
+        textC(g, F_SMALL, 160, 146, "CONNECTING...   ESC CANCEL", C_DIM);
+      } else if (connPhase == 2) {
+        g.fillCircle(160, 98, 12, C_GREEN);
+        g.drawLine(154, 98, 158, 103, C_BG); g.drawLine(158, 103, 166, 93, C_BG);
+        g.drawLine(154, 99, 158, 104, C_BG); g.drawLine(158, 104, 166, 94, C_BG);
+        textC(g, F_BOLD, 160, 132, "Connected", C_WHITE);
+        textC(g, F_SMALL, 160, 146, b, C_SOFT);
+      } else {
+        g.fillCircle(160, 98, 12, C_RED);
+        g.drawLine(155, 93, 165, 103, C_BG); g.drawLine(165, 93, 155, 103, C_BG);
+        g.drawLine(156, 93, 166, 103, C_BG); g.drawLine(166, 93, 156, 103, C_BG);
+        textC(g, F_BOLD, 160, 132, reasonText(), C_WHITE);
+        textC(g, F_SMALL, 160, 146, connOpen ? "ENTER RETRY   ESC CLOSE" : "ENTER RETYPE PASSWORD   ESC CLOSE", C_DIM);
+      }
+    }
+  }
+
+  // ======== API keys ========
+  void drawKeys(Canvas& g, uint32_t now) {
+    g.fillScreen(C_BG);
+    int n = keyRowCount();
+    for (int i = 0; i < n; i++) {
+      int y = 46 + ir((i - kTop) * 42);
+      if (y < 4 || y > 214) continue;
+      bool s = i == kSel;
+      if (i < nKeys) {
+        char m[40], sub[56]; maskKey(keys[i].val, m, sizeof(m));
+        snprintf(sub, sizeof(sub), "%s%s", m, i == activeKey ? "   IN USE" : "");
+        row(g, y, keys[i].label, sub, s, i == activeKey ? (s ? rgb(20, 120, 140) : C_TEAL) : 0);
+        if (i == activeKey) {
+          g.fillCircle(288, y + 18, 8, C_TEAL);
+          g.drawLine(284, y + 18, 287, y + 21, C_BG); g.drawLine(287, y + 21, 292, y + 15, C_BG);
+        }
+      } else {
+        row(g, y, "+  Add API key", nKeys ? "UP TO 5 KEYS" : "NEEDED FOR ASK AI", s, 0);
+      }
+    }
+    scrollHint(g, kTop, n, 4, 46, 162);
+    if (nKeys == 0) {
+      textC(g, F_SMALL, 160, 100, "Make a key at console.perplexity.ai", C_SOFT);
+      textC(g, F_SMALL, 160, 114, "(API Keys page), then type it in here.", C_SOFT);
+      textC(g, F_SMALL, 160, 134, "Keys stay on this device only.", C_DIM);
+    }
+    drawHeader(g, now, "API keys");
+    drawFooter(g, "", "ENTER select   ESC back");
+  }
+
+  // ======== Text entry ========
+  void drawText(Canvas& g, uint32_t now) {
+    g.fillScreen(C_BG);
+    text(g, F_SMALL, 12, 48, teHint, C_DIM);
+    int bx = 10, by = 60, bw = 300, bh = 132;
+    rrect(g, bx, by, bw, bh, 12, C_CARD);
+    g.drawRoundRect(bx, by, bw, bh, 12, blend(C_TEAL, C_CARD, 0.4f));
+    bool cursorOn = (now / 530) % 2;
+    if (teMono) {
+      // big fixed-width letters so every character can be checked
+      const int cw = 12, lh = 18, perLine = (bw - 24) / cw, maxLines = 7;
+      int lines = (teLen + perLine) / perLine;          // +1 slot for the cursor
+      int first = lines > maxLines ? lines - maxLines : 0;
+      g.setFont(nullptr); g.setTextSize(2); g.setTextWrap(false);
+      for (int l = first; l < lines; l++) {
+        int y = by + 10 + (l - first) * lh;
+        for (int c = 0; c < perLine; c++) {
+          int i = l * perLine + c;
+          if (i > teLen) break;
+          int x = bx + 12 + c * cw;
+          if (i == teLen) { if (cursorOn) g.fillRect(x, y, 10, 15, C_TEAL); break; }
+          char ch = teBuf[i];
+          // tell look-alike characters apart: 0 vs O, 1 vs l vs I
+          uint16_t col = C_WHITE;
+          if (ch >= '0' && ch <= '9') col = C_TEAL;
+          else if (ch == ' ') { g.fillRect(x + 2, y + 13, 7, 1, C_DIM); continue; }
+          else if (!isalpha((unsigned char)ch)) col = C_YELLOW;
+          g.drawChar(x, y, ch, col, col, 2);
+        }
+      }
+      g.setTextSize(1);
+    } else {
+      const char* s = teBuf; int w = textW(g, F_BIG, s);
+      while (w > bw - 30 && *s) { s++; w = textW(g, F_BIG, s); }
+      text(g, F_BIG, bx + 14, by + 44, s, C_WHITE);
+      if (cursorOn) g.fillRect(bx + 16 + w, by + 26, 3, 22, C_TEAL);
+    }
+    char cnt[40];
+    snprintf(cnt, sizeof(cnt), "%d CHARS%s", teLen, teMono ? "   NUMBERS TEAL, SYMBOLS YELLOW" : "");
+    text(g, F_SMALL, 12, 200, cnt, C_DIM);
+    drawHeader(g, now, teTitle);
+    drawFooter(g, "BKSP delete", "ENTER save   ESC cancel");
+  }
+
+  // ======== Pop-up menu ========
+  void drawSheet(Canvas& g) {
+    dimScreen(g);
+    int h = 44 + sheetN * 32, y = (SH - h) / 2;
+    rrect(g, 50, y, 220, h, 14, C_CARD);
+    g.drawRoundRect(50, y, 220, h, 14, C_LINE);
+    char t[30]; snprintf(t, sizeof(t), "%.22s", sheetTitle);
+    textC(g, F_BOLD, 160, y + 24, t, C_WHITE);
+    for (int i = 0; i < sheetN; i++) {
+      int ry = y + 36 + i * 32;
+      bool s = i == sheetSel;
+      if (s) rrect(g, 60, ry, 200, 28, 9, C_WHITE);
+      const char* o = sheetOpt[i] ? sheetOpt[i] : "";
+      bool danger = !strcmp(o, "Delete") || !strcmp(o, "Forget");
+      textC(g, F_REG, 160, ry + 19, o, s ? (danger ? rgb(190, 40, 40) : C_BG) : (danger ? C_RED : C_WHITE));
+    }
   }
 
   // ======== About ========
@@ -1286,15 +2830,13 @@ struct App {
     m.lift = 4 * (0.5f + 0.5f * sinf(now * 0.004f));
     m.look = sinf(now * 0.0015f);
     drawMascot(g, m);
-    textC(g, F_BOLD, 218, 72, "Altoids Gameboy", C_WHITE);
-    textC(g, F_SMALL, 218, 82, "ARCADE OS  v1.3", C_TEAL);
-    const char* lines[] = {"ESP32-S3 N16R8", "ST7789 320x240 display", "CardKB2 over Bluetooth LE", "700mAh LiPo + MT3608 5V"};
-    for (int i = 0; i < 4; i++) textC(g, F_SMALL, 218, 106 + i * 16, lines[i], C_SOFT);
+    textC(g, F_BOLD, 218, 64, "Altoids Gameboy", C_WHITE);
+    textC(g, F_SMALL, 218, 74, "ARCADE OS  " OS_VERSION, C_TEAL);
+    const char* lines[] = {"ESP32-S3 N16R8", "ST7789 320x240 display", "CardKB2 over Bluetooth LE", "WiFi + Perplexity Agent API", "700mAh LiPo + MT3608 5V"};
+    for (int i = 0; i < 5; i++) textC(g, F_SMALL, 218, 96 + i * 16, lines[i], C_SOFT);
     drawFooter(g, "", "ESC back");
   }
 };
-
-
 
 // ---------------- Display ----------------
 #define TFT_SCK   12
@@ -1318,6 +2860,191 @@ int  plat_loadInt(const char* key, int def) { return prefs.getInt(key, def); }
 void plat_saveInt(const char* key, int v) { prefs.putInt(key, v); }
 int  plat_kbState() { return g_kbState; }
 void plat_setFlip(bool flip) { tft.setRotation(flip ? (SCREEN_ROTATION + 2) % 4 : SCREEN_ROTATION); }
+
+void plat_loadStr(const char* key, char* out, int max) {
+  if (max <= 0) return;
+  out[0] = 0;
+  if (!prefs.isKey(key)) return;
+  String v = prefs.getString(key, "");
+  snprintf(out, max, "%s", v.c_str());
+}
+void plat_saveStr(const char* key, const char* v) { prefs.putString(key, v); }
+void* plat_bigAlloc(int bytes) { void* p = ps_malloc(bytes); return p ? p : malloc(bytes); }
+
+// ---------------- WiFi ----------------
+static volatile int g_wState = 0;          // 0 off, 1 connecting, 2 connected, 3 failed
+static volatile int g_wReason = 0, g_wDrops = 0;
+static uint32_t g_wStart = 0;
+static bool g_scanBusy = false;
+
+static void onWifiEvent(arduino_event_id_t ev, arduino_event_info_t info) {
+  if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) { g_wReason = info.wifi_sta_disconnected.reason; g_wDrops = g_wDrops + 1; }
+}
+void plat_wifiScanStart() {
+  if (g_scanBusy && WiFi.scanComplete() == WIFI_SCAN_RUNNING) return;
+  WiFi.scanDelete();
+  g_scanBusy = WiFi.scanNetworks(true, false) == WIFI_SCAN_RUNNING;
+}
+int plat_wifiScanCount() {
+  int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) return -1;
+  g_scanBusy = false;
+  return n < 0 ? -2 : n;
+}
+void plat_wifiScanGet(int i, char* ssid, int max, int* rssi, int* open) {
+  snprintf(ssid, max, "%s", WiFi.SSID(i).c_str());
+  *rssi = WiFi.RSSI(i);
+  *open = WiFi.encryptionType(i) == WIFI_AUTH_OPEN;
+}
+void plat_wifiConnect(const char* ssid, const char* pass) {
+  WiFi.disconnect(false, false);
+  g_wReason = 0; g_wDrops = 0;
+  WiFi.begin(ssid, (pass && pass[0]) ? pass : nullptr);
+  g_wState = 1; g_wStart = millis();
+}
+void plat_wifiDisconnect() { WiFi.disconnect(false, false); g_wState = 0; }
+int plat_wifiState() {
+  bool up = WiFi.status() == WL_CONNECTED && (uint32_t)WiFi.localIP() != 0;
+  if (up) { g_wState = 2; return 2; }
+  if (g_wState == 2) { g_wState = 1; g_wStart = millis(); g_wDrops = 0; }   // dropped: auto-reconnect is running
+  if (g_wState == 1) {
+    int r = g_wReason;
+    bool badPass = r == 2 || r == 15 || r == 202 || r == 204;
+    if (millis() - g_wStart > 15000 || (badPass && g_wDrops >= 2)) { WiFi.disconnect(false, false); g_wState = 3; }
+  }
+  return g_wState;
+}
+int plat_wifiReason() { return g_wReason; }
+void plat_wifiInfo(char* ssid, int max, char* ip, int ipmax, int* rssi) {
+  snprintf(ssid, max, "%s", WiFi.SSID().c_str());
+  snprintf(ip, ipmax, "%s", WiFi.localIP().toString().c_str());
+  *rssi = WiFi.RSSI();
+}
+
+// ---------------- Perplexity Agent API (runs on core 0) ----------------
+static const char* AI_HOST = "api.perplexity.ai";
+static const int AI_OUT_CAP = 6400, AI_LINE_CAP = 16384;
+static AiStream g_ai;
+static char* g_aiLine = nullptr; static char* g_aiOut = nullptr; static char* g_aiBody = nullptr;
+static char g_aiKey[168];
+static bool g_aiTls = true;
+static volatile int g_aiState = 0;         // 0 idle, 1 connecting, 2 waiting, 3 streaming, 4 done, 5 error
+static volatile bool g_aiCancel = false;
+static int g_aiReadPos = 0;
+static char g_aiErr[200];
+static SemaphoreHandle_t g_aiLock;
+static TaskHandle_t g_aiTask;
+static uint8_t g_aiBuf[4096];
+
+static void aiFail(const char* msg) {
+  xSemaphoreTake(g_aiLock, portMAX_DELAY);
+  snprintf(g_aiErr, sizeof(g_aiErr), "%s", msg);
+  xSemaphoreGive(g_aiLock);
+  g_aiState = 5;
+}
+static void aiRun() {
+  NetworkClientSecure client;
+  if (g_aiTls) client.useBuiltinCACertBundle(); else client.setInsecure();
+  client.setHandshakeTimeout(15);
+  if (!client.connect(AI_HOST, 443, 15000)) {
+    char e[120] = ""; client.lastError(e, sizeof(e));
+    char m[200];
+    snprintf(m, sizeof(m), "Could not reach the API%s%s", e[0] ? ": " : ".", e);
+    aiFail(m); return;
+  }
+  if (g_aiCancel) { client.stop(); aiFail("Stopped."); return; }
+  g_aiState = 2;
+  int blen = (int)strlen(g_aiBody);
+  char head[512];
+  int hl = snprintf(head, sizeof(head),
+    "POST /v1/agent HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\n"
+    "Content-Type: application/json\r\nAccept: text/event-stream\r\n"
+    "Content-Length: %d\r\nConnection: close\r\n\r\n", AI_HOST, g_aiKey, blen);
+  if (hl <= 0 || hl >= (int)sizeof(head)) { client.stop(); aiFail("API key is too long."); return; }
+  bool ok = client.write((const uint8_t*)head, hl) == (size_t)hl;
+  for (int off = 0; ok && off < blen; ) {
+    int n = blen - off > 1024 ? 1024 : blen - off;
+    int w = client.write((const uint8_t*)g_aiBody + off, n);
+    if (w <= 0) ok = false; else off += w;
+  }
+  if (!ok) { client.stop(); aiFail("Sending the question failed. Check WiFi."); return; }
+  uint32_t lastData = millis(), started = millis();
+  for (;;) {
+    if (g_aiCancel) break;
+    int a = client.available();
+    if (a > 0) {
+      int n = client.read(g_aiBuf, a > (int)sizeof(g_aiBuf) ? (int)sizeof(g_aiBuf) : a);
+      if (n > 0) {
+        xSemaphoreTake(g_aiLock, portMAX_DELAY);
+        g_ai.feed(g_aiBuf, n);
+        xSemaphoreGive(g_aiLock);
+        if (g_ai.gotText) g_aiState = 3;
+        lastData = millis();
+        if (g_ai.gotDone) break;
+      }
+      continue;
+    }
+    if (!client.connected()) break;
+    if (millis() - lastData > 60000 || millis() - started > 240000) break;
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  client.stop();
+  xSemaphoreTake(g_aiLock, portMAX_DELAY);
+  g_ai.finish();
+  xSemaphoreGive(g_aiLock);
+  if (g_aiCancel) { aiFail("Stopped."); return; }
+  if (g_ai.failed) { aiFail(g_ai.err[0] ? g_ai.err : "The request failed."); return; }
+  if (!g_ai.gotText) { aiFail(millis() - lastData > 60000 ? "The API stopped answering (timeout)." : "No answer came back."); return; }
+  if (!g_ai.gotDone || g_ai.incomplete) {
+    xSemaphoreTake(g_aiLock, portMAX_DELAY);
+    snprintf(g_aiErr, sizeof(g_aiErr), "Answer was cut off.");
+    xSemaphoreGive(g_aiLock);
+  }
+  g_aiState = 4;
+}
+static void aiTask(void*) {
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    aiRun();
+  }
+}
+bool plat_aiStart(const char* apiKey, const char* body, bool verifyTls) {
+  if (g_aiState == 1 || g_aiState == 2 || g_aiState == 3) return false;
+  if (!g_aiLine || !g_aiOut || !g_aiBody) return false;
+  int bl = (int)strlen(body);
+  if (bl >= Chat::BODY_CAP) return false;
+  memcpy(g_aiBody, body, bl + 1);
+  snprintf(g_aiKey, sizeof(g_aiKey), "%s", apiKey);
+  g_aiTls = verifyTls;
+  xSemaphoreTake(g_aiLock, portMAX_DELAY);
+  g_ai.begin(g_aiLine, AI_LINE_CAP, g_aiOut, AI_OUT_CAP);
+  g_aiReadPos = 0; g_aiErr[0] = 0;
+  xSemaphoreGive(g_aiLock);
+  g_aiCancel = false;
+  g_aiState = 1;
+  xTaskNotifyGive(g_aiTask);
+  return true;
+}
+int plat_aiState() { return g_aiState; }
+int plat_aiRead(char* out, int max) {
+  xSemaphoreTake(g_aiLock, portMAX_DELAY);
+  int n = g_ai.outLen - g_aiReadPos;
+  if (n > max) n = max;
+  if (n > 0) { memcpy(out, g_aiOut + g_aiReadPos, n); g_aiReadPos += n; }
+  xSemaphoreGive(g_aiLock);
+  return n > 0 ? n : 0;
+}
+void plat_aiInfo(char* status, int smax, char* sources, int srcmax, char* err, int emax) {
+  xSemaphoreTake(g_aiLock, portMAX_DELAY);
+  const char* s = g_ai.status;
+  if (g_aiState == 1) s = "Connecting";
+  else if (g_aiState == 2 && !s[0]) s = "Thinking";
+  snprintf(status, smax, "%s", s);
+  snprintf(sources, srcmax, "%s", g_ai.sources);
+  snprintf(err, emax, "%s", g_aiErr);
+  xSemaphoreGive(g_aiLock);
+}
+void plat_aiCancel() { g_aiCancel = true; }
 
 // ---------------- BLE (same working flow as KeyboardScreenTest) ----------------
 static NimBLEUUID kHidSvcUUID((uint16_t)0x1812);
@@ -1439,6 +3166,19 @@ void setup() {
                 esp_ptr_external_ram(canvas->getBuffer()) ? "in PSRAM" : "in internal RAM", (unsigned)ESP.getFreePsram());
 
   prefs.begin("arcade", false);
+
+  // WiFi (station mode; networks are saved by the app, not by the WiFi driver)
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.onEvent(onWifiEvent);
+  // AI buffers live in PSRAM; the TLS connection itself uses about 40 KB of internal RAM
+  g_aiLine = (char*)ps_malloc(AI_LINE_CAP);
+  g_aiOut  = (char*)ps_malloc(AI_OUT_CAP);
+  g_aiBody = (char*)ps_malloc(Chat::BODY_CAP);
+  g_aiLock = xSemaphoreCreateMutex();
+  xTaskCreatePinnedToCore(aiTask, "ai", 16384, nullptr, 1, &g_aiTask, 0);
+
   g_reportQueue = xQueueCreate(32, sizeof(Report));
   xTaskCreatePinnedToCore(bleTask, "ble", 8192, nullptr, 1, nullptr, 0);
   app.begin();
@@ -1453,7 +3193,7 @@ void loop() {
   while (xQueueReceive(g_reportQueue, &r, 0) == pdTRUE) {
     const uint8_t* d = r.data; int len = r.len;
     if (len == 9 && d[0] == 0x01) { d++; len = 8; }   // report ID prefix
-    if (len == 8) input.onHid(d + 2);
+    if (len == 8) input.onHid(d[0], d + 2);
   }
   int kb = g_kbState;
   if (kb != lastKb) { if (kb != 3) input.releaseAll(); lastKb = kb; }
