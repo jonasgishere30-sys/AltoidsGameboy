@@ -1,5 +1,9 @@
 BRAIN UNIT — POWER + DISPLAY
-Full picture of every wire: see "Wiring diagram.png" / "Wiring diagram.svg" in this repo.
+Full picture of every wire: see docs/images/wiring-diagram.png (or .svg).
+
+NOTE: The working firmware (firmware/AltoidsOS_OneFile) uses the "Adafruit ST7735 and ST7789" library, not TFT_eSPI.
+The TFT_eSPI steps in Step 2 below are only an alternative; you do not need them.
+The display is mounted sideways (landscape, pins on the LEFT) = setRotation(3).
 1. Power path (battery → ESP32-S3)
 Battery → TP4056 charger → switch → MT3608 boost (5.00V) → ESP32-S3 "5V" pin
 

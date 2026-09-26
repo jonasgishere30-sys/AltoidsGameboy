@@ -1,4 +1,4 @@
-// Altoids Gameboy - Arcade OS v1.1 (landscape) - SINGLE FILE VERSION
+// Altoids Gameboy - Arcade OS v1.2 (landscape) - SINGLE FILE
 // Paste this whole file into any sketch (any folder name). No other files needed.
 // Boot animation, menu and 6 built-in games, controlled with the CardKB2 over BLE.
 //
@@ -6,7 +6,7 @@
 //           PSRAM "OPI PSRAM", Partition "16M Flash (3MB APP/9.9MB FATFS)"
 // Display:  GMT024-10 ST7789 240x320 used sideways as 320x240 (SCK 12, SDA 11, RST 10, DC 9, CS 8)
 //           Pins on the LEFT. If the picture is upside down: Settings > Flip screen
-//           (or change SCREEN_ROTATION below from 1 to 3).
+//           (or change SCREEN_ROTATION below from 3 to 1).
 // Keyboard: M5Stack Unit CardKB2 in BLE HID mode (Fn + Sym + 4)
 // Libraries: "Adafruit ST7735 and ST7789 Library" (+ Adafruit GFX), "NimBLE-Arduino" 2.x
 //
@@ -1007,7 +1007,7 @@ struct App {
     games[0] = &snake; games[1] = &blocks; games[2] = &pong;
     games[3] = &breakout; games[4] = &flappy; games[5] = &g2048;
     showFps = plat_loadInt("fps", 0);
-    flip = plat_loadInt("flip", 0);
+    flip = plat_loadInt("flip2", 0);
     plat_setFlip(flip);
     loadBests();
     t0 = plat_millis();
@@ -1049,7 +1049,7 @@ struct App {
     if (in.rep[B_DOWN]) setSel = (setSel + 1) % N;
     if (in.pressed[B_B] || in.pressed[B_LEFT]) { openMenu(now); return; }
     if (in.pressed[B_A]) {
-      if (setSel == 0) { flip = !flip; plat_saveInt("flip", flip); plat_setFlip(flip); }
+      if (setSel == 0) { flip = !flip; plat_saveInt("flip2", flip); plat_setFlip(flip); }
       else if (setSel == 1) { showFps = !showFps; plat_saveInt("fps", showFps); }
       else if (setSel == 3) {
         if (resetArmAt && now - resetArmAt < 3000) {
@@ -1286,7 +1286,7 @@ struct App {
     m.look = sinf(now * 0.0015f);
     drawMascot(g, m);
     textC(g, F_BOLD, 218, 72, "Altoids Gameboy", C_WHITE);
-    textC(g, F_SMALL, 218, 82, "ARCADE OS  v1.1", C_TEAL);
+    textC(g, F_SMALL, 218, 82, "ARCADE OS  v1.2", C_TEAL);
     const char* lines[] = {"ESP32-S3 N16R8", "ST7789 320x240 display", "CardKB2 over Bluetooth LE", "700mAh LiPo + MT3608 5V"};
     for (int i = 0; i < 4; i++) textC(g, F_SMALL, 218, 106 + i * 16, lines[i], C_SOFT);
     drawFooter(g, "", "ESC back");
@@ -1301,7 +1301,7 @@ struct App {
 #define TFT_RST   10
 #define TFT_DC     9
 #define TFT_CS     8
-#define SCREEN_ROTATION 1   // landscape. 3 = landscape turned 180 degrees
+#define SCREEN_ROTATION 3   // landscape, pins on the LEFT (confirmed). 1 = turned 180 degrees
 Adafruit_ST7789 tft = Adafruit_ST7789(&SPI, TFT_CS, TFT_DC, TFT_RST);
 Canvas* canvas = nullptr;   // full-screen frame buffer (320x240x2 = 150 KB, lives in PSRAM)
 
