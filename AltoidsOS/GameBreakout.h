@@ -2,8 +2,8 @@
 #include "Game.h"
 
 struct BreakoutGame : Game {
-  static const int COLS = 8, ROWS = 6, BRW = 28, BRH = 10, BX0 = 1, BY0 = 52;
-  static const int PADY = 296, PADH = 6, BALL_R = 3;
+  static const int COLS = 10, ROWS = 6, BRW = 30, BRH = 10, BX0 = 1, BY0 = 46;
+  static const int PADY = 222, PADH = 6, BALL_R = 3;
   uint8_t bricks[ROWS][COLS]; int left;
   float padX, padW, bx, by, vx, vy, speed;
   int lives, level; bool stuck;
@@ -17,7 +17,7 @@ struct BreakoutGame : Game {
   }
   void begin() override {
     loadBest(); score = 0; phase = PLAY; lives = 3; level = 1;
-    padW = 48; padX = SW / 2 - padW / 2; buildLevel(); resetBall();
+    padW = 52; padX = SW / 2 - padW / 2; buildLevel(); resetBall();
   }
   static uint16_t rowColor(int r) {
     static const uint16_t C[ROWS] = {C_RED, C_ORANGE, C_YELLOW, C_GREEN, C_TEAL, C_PURPLE};
@@ -29,8 +29,8 @@ struct BreakoutGame : Game {
     if (m == 1) { begin(); return true; }
     if (phase != PLAY) return true;
     float t = dt / 1000.0f;
-    if (in.held[B_LEFT])  padX -= 280 * t;
-    if (in.held[B_RIGHT]) padX += 280 * t;
+    if (in.held[B_LEFT])  padX -= 300 * t;
+    if (in.held[B_RIGHT]) padX += 300 * t;
     padX = fmaxf(0, fminf(SW - padW, padX));
     if (stuck) {
       bx = padX + padW / 2; by = PADY - BALL_R - 1;
@@ -80,8 +80,8 @@ struct BreakoutGame : Game {
     g.fillCircle(ir(bx), ir(by), BALL_R, C_WHITE);
     for (int i = 0; i < lives; i++) g.fillCircle(10 + i * 12, 36, 3, C_ORANGE);
     char buf[16]; snprintf(buf, sizeof(buf), "LEVEL %d", level);
-    textR(g, F_SMALL, 234, 33, buf, C_DIM);
-    if (stuck && phase == PLAY) textC(g, F_SMALL, 120, 250, "SPACE to launch", C_SOFT);
+    textR(g, F_SMALL, SW - 6, 33, buf, C_DIM);
+    if (stuck && phase == PLAY) textC(g, F_SMALL, SW / 2, 170, "SPACE to launch", C_SOFT);
     drawOverlays(g, now, C_ORANGE);
   }
 };

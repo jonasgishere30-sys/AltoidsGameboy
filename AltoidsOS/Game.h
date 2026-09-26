@@ -44,33 +44,33 @@ struct Game {
     snprintf(sc, sizeof(sc), "%d", score);
     snprintf(bs, sizeof(bs), "BEST %d", best);
     int scW = textW(g, F_BOLD, sc);
-    textR(g, F_BOLD, 234, 19, sc, C_WHITE);
+    textR(g, F_BOLD, SW - 6, 19, sc, C_WHITE);
     int bsW = (int)strlen(bs) * 6;
-    text(g, F_SMALL, 234 - scW - 8 - bsW, 10, bs, C_DIM);
+    text(g, F_SMALL, SW - 6 - scW - 8 - bsW, 10, bs, C_DIM);
     g.drawFastHLine(0, 26, SW, C_LINE);
   }
   void drawOverlays(Canvas& g, uint32_t now, uint16_t accent) {
+    const int cx = SW / 2;
     if (phase == PAUSED) {
       dimScreen(g);
-      rrect(g, 30, 110, 180, 100, 14, C_CARD);
-      g.drawRoundRect(30, 110, 180, 100, 14, C_LINE);
-      textC(g, F_BIG, 120, 148, "Paused", C_WHITE);
-      textC(g, F_SMALL, 120, 170, "ENTER  resume", C_SOFT);
-      textC(g, F_SMALL, 120, 186, "ESC    menu", C_SOFT);
+      rrect(g, cx - 90, 70, 180, 100, 14, C_CARD);
+      g.drawRoundRect(cx - 90, 70, 180, 100, 14, C_LINE);
+      textC(g, F_BIG, cx, 108, "Paused", C_WHITE);
+      textC(g, F_SMALL, cx, 130, "ENTER  resume", C_SOFT);
+      textC(g, F_SMALL, cx, 146, "ESC    menu", C_SOFT);
     } else if (phase == OVER) {
       dimScreen(g);
       float t = easeOutBack(seg(now, overAt, overAt + 350));
-      int y = ir(lerpf(340, 96, t));
-      rrect(g, 24, y, 192, 128, 16, C_CARD);
-      g.drawRoundRect(24, y, 192, 128, 16, accent);
-      textC(g, F_BIG, 120, y + 34, "Game Over", C_WHITE);
+      int y = ir(lerpf(SH + 20, 56, t));
+      rrect(g, cx - 96, y, 192, 128, 16, C_CARD);
+      g.drawRoundRect(cx - 96, y, 192, 128, 16, accent);
+      textC(g, F_BIG, cx, y + 34, "Game Over", C_WHITE);
       char buf[32];
       snprintf(buf, sizeof(buf), "%d", score);
-      textC(g, F_HUGE, 120, y + 76, buf, accent);
+      textC(g, F_HUGE, cx, y + 76, buf, accent);
       bool rec = score > 0 && score >= best;
-      textC(g, F_SMALL, 120, y + 88, rec ? "NEW BEST!" : "", C_YELLOW);
-      snprintf(buf, sizeof(buf), "ENTER again   ESC menu");
-      textC(g, F_SMALL, 120, y + 108, buf, C_SOFT);
+      if (rec) textC(g, F_SMALL, cx, y + 88, "NEW BEST!", C_YELLOW);
+      textC(g, F_SMALL, cx, y + 108, "ENTER again   ESC menu", C_SOFT);
     }
   }
 };

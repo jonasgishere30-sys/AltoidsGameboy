@@ -1,9 +1,15 @@
-# Altoids Gameboy – Arcade OS v1.0
+# Altoids Gameboy – Arcade OS v1.1 (landscape)
 
 Boot animation → playful transition → game menu, plus 6 built-in games:
 **Snake, Blocks (falling blocks), Pong, Breakout, Flappy, 2048**, and Settings / About.
 
+![startup](startup.gif)
+
 ![preview](preview.png)
+
+**Screen orientation:** landscape 320x240 with the display's pins on the LEFT.
+If the picture is upside down, open **Settings > Flip screen** (saved permanently), or change
+`SCREEN_ROTATION` in `AltoidsOS.ino` from `1` to `3`.
 
 ## Upload
 1. Open `AltoidsOS/AltoidsOS.ino` in Arduino IDE (all `.h` files open as tabs automatically).
@@ -15,12 +21,12 @@ Boot animation → playful transition → game menu, plus 6 built-in games:
 ## Controls
 | Key | Action |
 |---|---|
-| Arrows or W A S D | Move / navigate |
+| Arrows or W A S D | Move / navigate (menu is a 4x2 grid) |
 | SPACE or ENTER | Select / action (flap, launch, hard drop) |
 | ESC or BACKSPACE | Back / pause |
 | P | Pause |
 
-Blocks: UP rotate, DOWN soft drop, SPACE hard drop.
+Blocks: UP rotate, DOWN soft drop, SPACE hard drop. Pong: UP/DOWN moves your (left) paddle.
 
 ## Notes
 - Drawing goes to a 240x320 frame buffer in PSRAM and is sent to the screen in one go, so there is no flicker.

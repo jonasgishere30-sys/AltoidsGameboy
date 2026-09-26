@@ -2,15 +2,15 @@
 #include "Game.h"
 
 struct FlappyGame : Game {
-  static const int GROUND = 296, PIPEW = 38, GAP = 96, NP = 3, SPACING = 150;
+  static const int GROUND = 218, PIPEW = 36, GAP = 84, NP = 4, SPACING = 140;
   float birdY, vel, scroll, pipeX[NP]; int gapY[NP]; bool passed[NP];
   bool started;
   const char* saveKey() override { return "flappy"; }
 
-  void newPipe(int i, float x) { pipeX[i] = x; gapY[i] = 70 + plat_random(GROUND - 70 - GAP - 30); passed[i] = false; }
+  void newPipe(int i, float x) { pipeX[i] = x; gapY[i] = 50 + plat_random(GROUND - 50 - GAP - 20); passed[i] = false; }
   void begin() override {
     loadBest(); score = 0; phase = PLAY; started = false;
-    birdY = 150; vel = 0; scroll = 0;
+    birdY = 110; vel = 0; scroll = 0;
     for (int i = 0; i < NP; i++) newPipe(i, SW + 40 + i * SPACING);
   }
   bool update(Input& in, uint32_t now, uint32_t dt) override {
@@ -21,7 +21,7 @@ struct FlappyGame : Game {
     float t = dt / 1000.0f;
     bool flap = in.pressed[B_A] || in.pressed[B_UP];
     if (!started) {
-      birdY = 150 + sinf(now * 0.006f) * 6;
+      birdY = 110 + sinf(now * 0.006f) * 6;
       scroll += 70 * t;
       if (flap) { started = true; vel = -270; }
       return true;
@@ -49,7 +49,7 @@ struct FlappyGame : Game {
     g.fillScreen(C_BG);
     // twinkling stars
     for (int i = 0; i < 18; i++) {
-      int sx = (i * 53 + 17) % SW, sy = 40 + (i * 97) % 200;
+      int sx = (i * 53 + 17) % SW, sy = 36 + (i * 97) % 170;
       sx = ((sx - (int)(scroll * 0.2f)) % SW + SW) % SW;
       g.drawPixel(sx, sy, ((now / 400 + i) % 5) ? C_LINE : C_SOFT);
     }
@@ -75,7 +75,7 @@ struct FlappyGame : Game {
     g.fillCircle(63, bY - 2, 2, C_WHITE); g.drawPixel(64, bY - 2, C_BG);
     g.fillTriangle(66, bY, 72, bY + 2, 66, bY + 4, C_ORANGE);
     drawHud(g, "Flappy", C_YELLOW);
-    if (!started && phase == PLAY) { textC(g, F_BOLD, 120, 110, "Get ready", C_WHITE); textC(g, F_SMALL, 120, 200, "SPACE or UP to flap", C_SOFT); }
+    if (!started && phase == PLAY) { textC(g, F_BOLD, SW / 2, 80, "Get ready", C_WHITE); textC(g, F_SMALL, SW / 2, 150, "SPACE or UP to flap", C_SOFT); }
     drawOverlays(g, now, C_YELLOW);
   }
 };

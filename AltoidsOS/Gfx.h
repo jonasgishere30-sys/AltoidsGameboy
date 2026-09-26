@@ -1,5 +1,5 @@
 #pragma once
-// Colors, easing, text and the mascot. Everything draws into a 240x320 canvas.
+// Colors, easing, text and the mascot. Everything draws into a 320x240 (landscape) canvas.
 #include <Adafruit_GFX.h>
 #include <math.h>
 #include <Fonts/FreeSansBold9pt7b.h>
@@ -8,7 +8,7 @@
 #include <Fonts/FreeSans9pt7b.h>
 
 typedef GFXcanvas16 Canvas;
-static const int SW = 240, SH = 320;
+static const int SW = 320, SH = 240;
 
 static constexpr uint16_t rgb(uint8_t r, uint8_t g, uint8_t b) {
   return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
@@ -102,6 +102,7 @@ static void textR(Canvas& g, Font f, int rx, int y, const char* s, uint16_t c) {
 struct Mascot {
   float cx = 120, cy = 130, s = 0.5f;  // centre of the screen box at rest
   float look = 0;       // -1 left .. 1 right
+  float lookY = 0;      // -1 up .. 1 down
   float eyeOpen = 1;    // 1 open, 0 closed (blink)
   float eyeScale = 1;   // 0 = no eyes (pop-in)
   float happy = 0;      // 1 = eyes squint into little arcs
@@ -130,7 +131,7 @@ static void drawMascot(Canvas& g, const Mascot& m) {
     float ew = 24 * s * m.eyeScale;
     float ehFull = 56 * s * m.eyeScale * (1 - 0.1f * m.squash);
     float eh = fmaxf(ehFull * m.eyeOpen, fmaxf(3 * s, 2));
-    float ecy = top + H / 2 - 4 * s;
+    float ecy = top + H / 2 - 4 * s + m.lookY * 18 * s;
     float pairCx = m.cx + m.look * 34 * s;
     for (int i = -1; i <= 1; i += 2) {
       float ex = pairCx + i * 26 * s;
@@ -147,4 +148,14 @@ static void drawMascot(Canvas& g, const Mascot& m) {
       }
     }
   }
+}
+
+// Four-point twinkle star
+static void drawSparkle(Canvas& g, float x, float y, float r, uint16_t c) {
+  if (r < 1) return;
+  float w = fmaxf(r * 0.28f, 1);
+  g.fillTriangle(ir(x), ir(y - r), ir(x - w), ir(y), ir(x + w), ir(y), c);
+  g.fillTriangle(ir(x), ir(y + r), ir(x - w), ir(y), ir(x + w), ir(y), c);
+  g.fillTriangle(ir(x - r), ir(y), ir(x), ir(y - w), ir(x), ir(y + w), c);
+  g.fillTriangle(ir(x + r), ir(y), ir(x), ir(y - w), ir(x), ir(y + w), c);
 }

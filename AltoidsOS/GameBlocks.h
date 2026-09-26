@@ -3,7 +3,7 @@
 
 // Falling-blocks puzzle (Tetris-style)
 struct BlocksGame : Game {
-  static const int BW = 10, BH = 20, CS = 14, OX = 8, OY = 36;
+  static const int BW = 10, BH = 20, CS = 10, OX = 110, OY = 33;
   uint8_t board[BH][BW];
   int px, py, pr, pt, nextT;
   uint8_t bag[7]; int bagN;
@@ -129,7 +129,7 @@ struct BlocksGame : Game {
   }
   void drawCell(Canvas& g, int x, int y, uint16_t c) {
     rrect(g, x + 1, y + 1, CS - 2, CS - 2, 2, c);
-    g.drawFastHLine(x + 3, y + 3, CS - 7, blend(c, C_WHITE, 0.5f));
+    g.drawFastHLine(x + 2, y + 2, CS - 5, blend(c, C_WHITE, 0.5f));
   }
   void draw(Canvas& g, uint32_t now) override {
     g.fillScreen(C_BG);
@@ -151,23 +151,24 @@ struct BlocksGame : Game {
         if (py + rr >= 0) drawCell(g, OX + (px + cc) * CS, OY + (py + rr) * CS, color(pt));
       }
     }
-    // side panel
-    int sx = 162;
-    text(g, F_SMALL, sx, 40, "NEXT", C_DIM);
-    rrect(g, sx, 52, 70, 50, 8, C_CARD);
+    // left panel: next piece
+    text(g, F_SMALL, 16, 40, "NEXT", C_DIM);
+    rrect(g, 14, 52, 78, 54, 8, C_CARD);
     uint16_t nm = shape(nextT, 0);
-    int offX = (nextT == 0 || nextT == 3) ? 7 : 14, offY = (nextT == 0) ? 12 : 18;
+    int offX = (nextT == 0 || nextT == 3) ? 15 : 21, offY = (nextT == 0) ? 12 : 18;
     for (int rr = 0; rr < 4; rr++) for (int cc = 0; cc < 4; cc++) if (cell(nm, rr, cc))
-      rrect(g, sx + offX + cc * 12 + 1, 52 + offY - 6 + rr * 12 + 1, 10, 10, 2, color(nextT));
+      rrect(g, 14 + offX + cc * 12 + 1, 52 + offY - 6 + rr * 12 + 1, 10, 10, 2, color(nextT));
+    text(g, F_SMALL, 16, 150, "UP  rotate", C_DIM);
+    text(g, F_SMALL, 16, 164, "DN  soft drop", C_DIM);
+    text(g, F_SMALL, 16, 178, "SPC hard drop", C_DIM);
+    text(g, F_SMALL, 16, 192, "ESC pause", C_DIM);
+    // right panel: lines & level
     char buf[16];
-    text(g, F_SMALL, sx, 116, "LINES", C_DIM);
-    snprintf(buf, sizeof(buf), "%d", lines); text(g, F_BIG, sx, 146, buf, C_WHITE);
-    text(g, F_SMALL, sx, 162, "LEVEL", C_DIM);
-    snprintf(buf, sizeof(buf), "%d", level); text(g, F_BIG, sx, 192, buf, C_PURPLE);
-    text(g, F_SMALL, sx, 250, "UP  rotate", C_DIM);
-    text(g, F_SMALL, sx, 262, "DN  soft", C_DIM);
-    text(g, F_SMALL, sx, 274, "SPC drop", C_DIM);
-    text(g, F_SMALL, sx, 286, "ESC pause", C_DIM);
+    int sx = 232;
+    text(g, F_SMALL, sx, 40, "LINES", C_DIM);
+    snprintf(buf, sizeof(buf), "%d", lines); text(g, F_BIG, sx, 72, buf, C_WHITE);
+    text(g, F_SMALL, sx, 92, "LEVEL", C_DIM);
+    snprintf(buf, sizeof(buf), "%d", level); text(g, F_BIG, sx, 124, buf, C_PURPLE);
     drawOverlays(g, now, C_PURPLE);
   }
 };

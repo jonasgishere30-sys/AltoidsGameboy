@@ -1,9 +1,11 @@
-// Altoids Gameboy - Arcade OS v1.0
+// Altoids Gameboy - Arcade OS v1.1 (landscape)
 // Boot animation, menu and 6 built-in games, controlled with the CardKB2 over BLE.
 //
 // Board:    ESP32-S3 N16R8 -> Tools: "ESP32S3 Dev Module", Flash Size 16MB,
 //           PSRAM "OPI PSRAM", Partition "16M Flash (3MB APP/9.9MB FATFS)"
-// Display:  GMT024-10 ST7789 240x320 (SCK 12, SDA 11, RST 10, DC 9, CS 8)
+// Display:  GMT024-10 ST7789 240x320 used sideways as 320x240 (SCK 12, SDA 11, RST 10, DC 9, CS 8)
+//           Pins on the LEFT. If the picture is upside down: Settings > Flip screen
+//           (or change SCREEN_ROTATION below from 1 to 3).
 // Keyboard: M5Stack Unit CardKB2 in BLE HID mode (Fn + Sym + 4)
 // Libraries: "Adafruit ST7735 and ST7789 Library" (+ Adafruit GFX), "NimBLE-Arduino" 2.x
 //
@@ -23,8 +25,9 @@
 #define TFT_RST   10
 #define TFT_DC     9
 #define TFT_CS     8
+#define SCREEN_ROTATION 1   // landscape. 3 = landscape turned 180 degrees
 Adafruit_ST7789 tft = Adafruit_ST7789(&SPI, TFT_CS, TFT_DC, TFT_RST);
-Canvas* canvas = nullptr;   // full-screen frame buffer (240x320x2 = 150 KB, lives in PSRAM)
+Canvas* canvas = nullptr;   // full-screen frame buffer (320x240x2 = 150 KB, lives in PSRAM)
 
 App app;
 Input input;
@@ -37,6 +40,7 @@ long plat_random(long n) { return n > 0 ? (long)(esp_random() % (uint32_t)n) : 0
 int  plat_loadInt(const char* key, int def) { return prefs.getInt(key, def); }
 void plat_saveInt(const char* key, int v) { prefs.putInt(key, v); }
 int  plat_kbState() { return g_kbState; }
+void plat_setFlip(bool flip) { tft.setRotation(flip ? (SCREEN_ROTATION + 2) % 4 : SCREEN_ROTATION); }
 
 // ---------------- BLE (same working flow as KeyboardScreenTest) ----------------
 static NimBLEUUID kHidSvcUUID((uint16_t)0x1812);
@@ -144,14 +148,14 @@ void setup() {
   tft.init(240, 320);
   tft.setSPISpeed(40000000);
   tft.invertDisplay(false);
-  tft.setRotation(0);
+  tft.setRotation(SCREEN_ROTATION);
   tft.fillScreen(ST77XX_BLACK);
 
-  canvas = new Canvas(240, 320);
+  canvas = new Canvas(SW, SH);
   if (!canvas || !canvas->getBuffer()) {
-    tft.setTextColor(ST77XX_RED); tft.setTextSize(2); tft.setCursor(10, 150);
+    tft.setTextColor(ST77XX_RED); tft.setTextSize(2); tft.setCursor(10, 100);
     tft.print("No memory: enable");
-    tft.setCursor(10, 172); tft.print("OPI PSRAM in Tools");
+    tft.setCursor(10, 122); tft.print("OPI PSRAM in Tools");
     for (;;) delay(1000);
   }
   Serial.printf("Frame buffer %s, free PSRAM %u\n",
@@ -187,10 +191,10 @@ void loop() {
   if (now - fpsT >= 1000) { fps = frames; frames = 0; fpsT = now; }
   if (app.showFps) {
     char b[8]; snprintf(b, sizeof(b), "%u", (unsigned)fps);
-    canvas->fillRect(0, 312, 20, 8, C_BG);
-    text(*canvas, F_SMALL, 1, 312, b, C_GREEN);
+    canvas->fillRect(0, SH - 8, 20, 8, C_BG);
+    text(*canvas, F_SMALL, 1, SH - 8, b, C_GREEN);
   }
 
   // 3) Send the finished frame to the screen in one go (no flicker)
-  tft.drawRGBBitmap(0, 0, canvas->getBuffer(), 240, 320);
+  tft.drawRGBBitmap(0, 0, canvas->getBuffer(), SW, SH);
 }

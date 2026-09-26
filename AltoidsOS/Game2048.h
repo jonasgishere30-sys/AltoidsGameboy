@@ -2,7 +2,7 @@
 #include "Game.h"
 
 struct Game2048 : Game {
-  static const int TS = 54, GAPP = 4, GX = 2, GY = 62;
+  static const int TS = 48, GAPP = 4, GX = 12, GY = 31;
   uint16_t t[4][4]; uint32_t popAt[4][4]; bool won, keepGoing;
   const char* saveKey() override { return "2048"; }
 
@@ -89,16 +89,18 @@ struct Game2048 : Game {
       rrect(g, x + (TS - sz) / 2, y + (TS - sz) / 2, sz, sz, 8, tileColor(v));
       char buf[8]; snprintf(buf, sizeof(buf), "%d", v);
       uint16_t tc = v <= 4 ? rgb(40, 40, 44) : C_BG;
-      textC(g, v >= 1000 ? F_BOLD : F_BIG, x + TS / 2, y + TS / 2 + (v >= 1000 ? 6 : 8), buf, tc);
+      textC(g, v >= 1000 ? F_SMALL : (v >= 100 ? F_BOLD : F_BIG), x + TS / 2, y + TS / 2 + (v >= 1000 ? -3 : (v >= 100 ? 6 : 8)), buf, tc);
     }
-    textC(g, F_SMALL, 120, 44, "Arrows / WASD to slide", C_DIM);
-    textC(g, F_SMALL, 120, 306, "ESC pause", C_DIM);
+    textC(g, F_SMALL, 272, 90, "ARROWS", C_DIM);
+    textC(g, F_SMALL, 272, 102, "or WASD", C_DIM);
+    textC(g, F_SMALL, 272, 114, "to slide", C_DIM);
+    textC(g, F_SMALL, 272, 150, "ESC pause", C_DIM);
     if (won && !keepGoing && phase == PLAY) {
       dimScreen(g);
-      rrect(g, 30, 120, 180, 90, 14, C_CARD);
-      textC(g, F_BIG, 120, 156, "2048!", C_PURPLE);
-      textC(g, F_SMALL, 120, 176, "ENTER keep going", C_SOFT);
-      textC(g, F_SMALL, 120, 190, "ESC   finish", C_SOFT);
+      rrect(g, SW / 2 - 90, 75, 180, 90, 14, C_CARD);
+      textC(g, F_BIG, SW / 2, 111, "2048!", C_PURPLE);
+      textC(g, F_SMALL, SW / 2, 131, "ENTER keep going", C_SOFT);
+      textC(g, F_SMALL, SW / 2, 145, "ESC   finish", C_SOFT);
     }
     drawOverlays(g, now, C_PINK);
   }
