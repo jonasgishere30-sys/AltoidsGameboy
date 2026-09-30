@@ -1699,11 +1699,10 @@ static volatile int g_gemState = 0;          // 0 idle, 1 sending, 2 answer read
 void plat_wifiOn(const char* ssid, const char* pass) {
   g_wifiWantOff = false;
   WiFi.persistent(false);                    // don't let the WiFi driver save its own copy
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, (pass && pass[0]) ? pass : nullptr);
+  WiFi.begin(ssid, (pass && pass[0]) ? pass : nullptr);   // driver already in STA mode from boot
   g_wifiOn = true; g_wifiStart = millis();
 }
-static void wifiOffNow() { WiFi.disconnect(false); WiFi.mode(WIFI_OFF); g_wifiOn = false; }
+static void wifiOffNow() { WiFi.disconnect(false); g_wifiOn = false; }   // stay in STA mode, just disconnect
 void plat_wifiOff() {                        // called when leaving AI Chat (waits for a running request)
   if (g_gemState == 1) g_wifiWantOff = true; else wifiOffNow();
 }
@@ -2088,7 +2087,8 @@ void setup() {
 
   prefs.begin("arcade", false);
   WiFi.persistent(false);
-  WiFi.mode(WIFI_OFF);                           // init WiFi driver at boot so later calls don't error
+  WiFi.mode(WIFI_STA);                           // init WiFi driver in STA mode at boot (radio on, not connected)
+  WiFi.disconnect(false);                         // make sure we start disconnected
   g_reportQueue = xQueueCreate(32, sizeof(Report));
   xTaskCreatePinnedToCore(bleTask, "ble", 8192, nullptr, 1, nullptr, 0);
   app.begin();
