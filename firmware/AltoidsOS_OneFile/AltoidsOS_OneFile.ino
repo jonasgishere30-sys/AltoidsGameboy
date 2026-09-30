@@ -342,9 +342,6 @@ void     plat_saveStr(const char* key, const char* value);
 void     plat_wifiOn(const char* ssid, const char* pass);
 void     plat_wifiOff();
 int      plat_wifiStatus();                         // 0 off, 1 connecting, 2 connected, 3 not found, 4 failed, 5 timed out
-void     plat_wifiScanStart();
-int      plat_wifiScanCount();                      // -1 scanning, -2 failed, else count
-void     plat_wifiScanGet(int i, char* ssid, int max, int* rssi, bool* open);
 bool     plat_geminiStart(const char* key, const char* question);   // false if busy
 int      plat_geminiState();                        // 0 idle, 1 sending, 2 answer, 3 error
 const char* plat_geminiText();                      // the answer, or the error message
@@ -1020,10 +1017,10 @@ struct Game2048 : Game {
 
 // ================= AI Chat (Google Gemini) =================
 // Its own screen, like a game. Type a question, ENTER sends it to Gemini over WiFi.
-// WiFi network/password and the Gemini API key are set inside AI Chat (TAB or type /setup).
+// WiFi name/password (typed in, saved once connected) and the Gemini API key are set inside AI Chat (TAB or /setup).
 // WiFi is only switched on while AI Chat is open, so the games run exactly as before.
 struct AiChatGame : Game {
-  enum Mode { M_CHAT, M_SETUP, M_SCAN, M_EDIT } mode = M_CHAT;
+  enum Mode { M_CHAT, M_SETUP, M_EDIT } mode = M_CHAT;
   enum Res { R_NONE, R_SENDING, R_ANSWER, R_ERROR } res = R_NONE;
   static const int QMAX = 300;
   char ssid[33] = "", pass[65] = "", key[129] = "";
@@ -1037,10 +1034,9 @@ struct AiChatGame : Game {
   static const int MAXL = 420; Line lines[MAXL]; int nL = 0;
   bool dirty = true; float scroll = 0, scrollT = 0;
   static const int VIEW_TOP = 46, VIEW_BOT = 208, LH = 17;
-  // setup / scan / edit
+  // setup / edit
   int setSel = 0;
-  static const int MAXN = 12; char nets[MAXN][33]; bool netOpen[MAXN]; int netRssi[MAXN]; int nNets = 0, netSel = 0;
-  bool scanning = false, scanFailed = false;
+  bool wifiUnsaved = false;                      // typed WiFi name/password, saved only after it connects
   int editWhat = 0; char ebuf[129] = ""; int eLen = 0; Mode editBack = M_SETUP;
 
   const char* saveKey() override { return "aichat"; }
@@ -1084,6 +1080,9 @@ struct AiChatGame : Game {
   // ---- update ----
   bool update(Input& in, uint32_t now, uint32_t) override {
     in.textMode = (mode == M_CHAT || mode == M_EDIT);
+    if (wifiUnsaved && plat_wifiStatus() == 2) {   // connected: now save the name + password
+      plat_saveStr("ai_ssid", ssid); plat_saveStr("ai_pass", pass); wifiUnsaved = false;
+    }
     if (mode == M_CHAT) {
       if (in.pressed[B_B]) { in.textMode = false; in.clearChars(); plat_wifiOff(); return false; }   // ESC = back to games
       for (char c; (c = in.getChar()) != 0;) {
@@ -1106,40 +1105,10 @@ struct AiChatGame : Game {
         mode = M_CHAT; in.clearChars(); return true;
       }
       if (in.pressed[B_A]) {
-        if (setSel == 0) { mode = M_SCAN; nNets = 0; netSel = 0; scanFailed = false; scanning = true; plat_wifiScanStart(); }
+        if (setSel == 0) openEdit(0, ssid);
         else if (setSel == 1) openEdit(1, pass);
         else if (setSel == 2) openEdit(2, key);
         in.clearChars();
-      }
-    } else if (mode == M_SCAN) {
-      if (scanning) {
-        int n = plat_wifiScanCount();
-        if (n == -2) { scanning = false; scanFailed = true; }
-        else if (n >= 0) {
-          scanning = false; nNets = 0;
-          for (int i = 0; i < n && nNets < MAXN; i++) {
-            char s[33]; int rssi; bool open;
-            plat_wifiScanGet(i, s, sizeof(s), &rssi, &open);
-            if (!s[0]) continue;                          // hidden network
-            bool dup = false;
-            for (int j = 0; j < nNets; j++) if (strcmp(nets[j], s) == 0) dup = true;
-            if (dup) continue;
-            snprintf(nets[nNets], 33, "%s", s); netOpen[nNets] = open; netRssi[nNets] = rssi; nNets++;
-          }
-        }
-      }
-      if (in.pressed[B_B]) { mode = M_SETUP; return true; }
-      if (nNets > 0) {
-        if (in.rep[B_UP]) netSel = (netSel + nNets - 1) % nNets;
-        if (in.rep[B_DOWN]) netSel = (netSel + 1) % nNets;
-      }
-      if (in.pressed[B_A] && !scanning) {
-        if (nNets == 0) { scanFailed = false; scanning = true; plat_wifiScanStart(); }   // rescan
-        else {
-          snprintf(ssid, sizeof(ssid), "%s", nets[netSel]); plat_saveStr("ai_ssid", ssid);
-          if (netOpen[netSel]) { pass[0] = 0; plat_saveStr("ai_pass", ""); mode = M_SETUP; setSel = 3; }
-          else { pass[0] = 0; openEdit(1, pass); }
-        }
       }
     } else if (mode == M_EDIT) {
       for (char c; (c = in.getChar()) != 0;) {
@@ -1148,7 +1117,8 @@ struct AiChatGame : Game {
       }
       if (in.pressed[B_B]) { mode = M_SETUP; in.clearChars(); return true; }        // cancel, keep old value
       if (in.pressed[B_A]) {
-        if (editWhat == 1) { snprintf(pass, sizeof(pass), "%s", ebuf); plat_saveStr("ai_pass", pass); setSel = key[0] ? 3 : 2; }
+        if (editWhat == 0) { snprintf(ssid, sizeof(ssid), "%s", ebuf); wifiUnsaved = true; setSel = 1; }
+        else if (editWhat == 1) { snprintf(pass, sizeof(pass), "%s", ebuf); wifiUnsaved = true; setSel = key[0] ? 3 : 2; }
         else {
           int o = 0; for (int i = 0; ebuf[i]; i++) if (ebuf[i] != ' ') key[o++] = ebuf[i];   // keys never contain spaces
           key[o] = 0; plat_saveStr("gem_key", key); setSel = 3;
@@ -1159,7 +1129,7 @@ struct AiChatGame : Game {
     }
     return true;
   }
-  int editMax() { return editWhat == 1 ? 64 : 128; }
+  int editMax() { return editWhat == 0 ? 32 : editWhat == 1 ? 64 : 128; }
   void openEdit(int what, const char* cur) {
     editWhat = what; snprintf(ebuf, sizeof(ebuf), "%s", cur); eLen = strlen(ebuf); mode = M_EDIT;
   }
@@ -1252,7 +1222,7 @@ struct AiChatGame : Game {
       uint16_t tc = s ? C_BG : C_WHITE, sc = s ? rgb(90, 90, 96) : C_DIM;
       text(g, F_BOLD, 22, y + 17, names[i], tc);
       char sub[48] = "";
-      if (i == 0) snprintf(sub, sizeof(sub), "%s", ssid[0] ? ssid : "NOT SET - ENTER TO SCAN");
+      if (i == 0) { if (!ssid[0]) snprintf(sub, sizeof(sub), "NOT SET - ENTER TO TYPE IT"); else snprintf(sub, sizeof(sub), wifiUnsaved ? "%.26s (NOT SAVED YET)" : "%s", ssid); }
       if (i == 1) { if (pass[0]) snprintf(sub, sizeof(sub), "SAVED (%d CHARACTERS)", (int)strlen(pass)); else snprintf(sub, sizeof(sub), "NONE (OPEN NETWORK)"); }
       if (i == 2) { if (key[0]) snprintf(sub, sizeof(sub), "SAVED (%d CHARACTERS)", (int)strlen(key)); else snprintf(sub, sizeof(sub), "NOT SET - FROM AISTUDIO.GOOGLE.COM"); }
       if (i == 3) snprintf(sub, sizeof(sub), "WIFI: %s", wifiText());
@@ -1261,25 +1231,9 @@ struct AiChatGame : Game {
     g.fillRect(0, 216, SW, SH - 216, C_BG);
     textR(g, F_SMALL, SW - 12, 224, "D/X move   ENTER select   ESC back", C_DIM);
   }
-  void drawScan(Canvas& g, uint32_t now) {
-    text(g, F_BOLD, 12, 62, "Pick your WiFi (2.4 GHz)", C_WHITE);
-    if (scanning) { textC(g, F_SMALL, SW / 2, 120, (now / 400) % 2 ? "SCANNING..." : "SCANNING", C_YELLOW); }
-    else if (scanFailed) textC(g, F_SMALL, SW / 2, 120, "SCAN FAILED - ENTER TO TRY AGAIN", C_RED);
-    else if (nNets == 0) textC(g, F_SMALL, SW / 2, 120, "NO NETWORKS FOUND - ENTER TO SCAN AGAIN", C_ORANGE);
-    int top = netSel > 5 ? netSel - 5 : 0;
-    for (int i = top; i < nNets && i < top + 6; i++) {
-      int y = 72 + (i - top) * 23; bool s = i == netSel;
-      rrect(g, 10, y, 300, 21, 6, s ? C_WHITE : C_CARD);
-      text(g, F_REG, 18, y + 15, nets[i], s ? C_BG : C_WHITE);
-      char r[20]; snprintf(r, sizeof(r), "%s %d", netOpen[i] ? "OPEN" : "", netRssi[i]);
-      textR(g, F_SMALL, 302, y + 7, r, s ? rgb(90, 90, 96) : C_DIM);
-    }
-    g.fillRect(0, 216, SW, SH - 216, C_BG);
-    textR(g, F_SMALL, SW - 12, 224, "D/X move   ENTER pick   ESC back", C_DIM);
-  }
   void drawEdit(Canvas& g, uint32_t now) {
-    text(g, F_BOLD, 12, 62, editWhat == 1 ? "WiFi password" : "Gemini API key", C_WHITE);
-    textR(g, F_SMALL, 308, 54, editWhat == 1 ? "CASE SENSITIVE" : "NO SPACES", C_DIM);
+    text(g, F_BOLD, 12, 62, editWhat == 0 ? "WiFi name (2.4 GHz)" : editWhat == 1 ? "WiFi password" : "Gemini API key", C_WHITE);
+    textR(g, F_SMALL, 308, 54, editWhat == 2 ? "NO SPACES" : "CASE SENSITIVE", C_DIM);
     rrect(g, 8, 70, SW - 16, 138, 10, C_CARD);
     g.setFont(nullptr); g.setTextSize(2); g.setTextWrap(false);
     const int PER = 24;                                         // 12 px per character
@@ -1303,7 +1257,6 @@ struct AiChatGame : Game {
     g.fillScreen(C_BG);
     if (mode == M_CHAT) drawChat(g, now);
     else if (mode == M_SETUP) drawSetup(g, now);
-    else if (mode == M_SCAN) drawScan(g, now);
     else drawEdit(g, now);
   }
 };
@@ -1745,23 +1698,6 @@ int plat_wifiStatus() {                      // 0 off, 1 connecting, 2 connected
   if (s == WL_CONNECT_FAILED) return 4;
   if (millis() - g_wifiStart > 20000) return 5;
   return 1;
-}
-void plat_wifiScanStart() {
-  if (!g_wifiOn) { WiFi.persistent(false); WiFi.mode(WIFI_STA); g_wifiOn = true; g_wifiStart = millis(); }
-  WiFi.disconnect(false);                    // scanning while connecting often fails
-  WiFi.scanDelete();
-  WiFi.scanNetworks(true);                   // async
-}
-int plat_wifiScanCount() {                   // -1 scanning, -2 failed, else number found
-  int n = WiFi.scanComplete();
-  if (n == WIFI_SCAN_RUNNING) return -1;
-  if (n < 0) return -2;
-  return n;
-}
-void plat_wifiScanGet(int i, char* ssid, int max, int* rssi, bool* open) {
-  snprintf(ssid, max, "%s", WiFi.SSID(i).c_str());
-  *rssi = WiFi.RSSI(i);
-  *open = WiFi.encryptionType(i) == WIFI_AUTH_OPEN;
 }
 
 // Gemini API: POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent
