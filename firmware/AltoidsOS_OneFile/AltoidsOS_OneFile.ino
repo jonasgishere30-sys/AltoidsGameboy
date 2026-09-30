@@ -12,12 +12,18 @@
 //
 // Controls: D = up, X = down, Z = left, C = right (arrow keys also work),  SPACE / ENTER = select / action,
 //           ESC / BACKSPACE = back / pause,  P = pause
+// AI Chat:  menu tile after About. Letters type, ENTER sends to Google Gemini, ESC = back to games,
+//           UP/DOWN arrows scroll, TAB (or type /setup) = WiFi network/password + Gemini API key.
+//           WiFi + HTTPClient come with the ESP32 core (no extra libraries).
 
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
+#include <WiFi.h>             // AI Chat
+#include <WiFiClientSecure.h> // AI Chat
+#include <HTTPClient.h>       // AI Chat
 // ================= UI + games (all in one file) =================
 // Boot animation -> playful transition -> menu -> games / settings / about
 // Colors, easing, text and the mascot. Everything draws into a 320x240 (landscape) canvas.
@@ -52,7 +58,7 @@ static const uint16_t C_BLUE   = rgb(96, 165, 250);
 // ---- Types used by the drawing functions (kept above every function so the
 //      sketch also compiles as one single .ino file) ----
 enum Font { F_SMALL, F_REG, F_BOLD, F_BIG, F_HUGE };
-enum Icon { IC_SNAKE, IC_BLOCKS, IC_PONG, IC_BREAKOUT, IC_FLAPPY, IC_2048, IC_SETTINGS, IC_ABOUT };
+enum Icon { IC_SNAKE, IC_BLOCKS, IC_PONG, IC_BREAKOUT, IC_FLAPPY, IC_2048, IC_SETTINGS, IC_ABOUT, IC_AI };
 struct Mascot {
   float cx = 120, cy = 130, s = 0.5f;  // centre of the screen box at rest
   float look = 0;       // -1 left .. 1 right
@@ -190,7 +196,7 @@ static void drawSparkle(Canvas& g, float x, float y, float r, uint16_t c) {
 #include <stdint.h>
 #include <string.h>
 
-enum Btn : uint8_t { B_UP, B_DOWN, B_LEFT, B_RIGHT, B_A, B_B, B_PAUSE, B_COUNT };
+enum Btn : uint8_t { B_UP, B_DOWN, B_LEFT, B_RIGHT, B_A, B_B, B_PAUSE, B_TAB, B_COUNT };   // B_TAB: AI Chat only
 
 struct Input {
   bool     held[B_COUNT]    = {};
@@ -202,6 +208,60 @@ struct Input {
   bool     pending[B_COUNT]   = {};
   bool     rawHeld[B_COUNT]   = {};
   uint8_t  prevKeys[6] = {};
+
+  // ---- text typing (only used by AI Chat; games never turn textMode on) ----
+  bool     textMode = false;          // set by AI Chat each frame
+  char     chq[64];                   // typed characters ('\b' = backspace)
+  uint8_t  chHead = 0, chTail = 0;
+  bool     bkspHeld = false, bkspNew = false;
+  uint32_t bkspStart = 0, bkspLast = 0;
+  // While typing only these keys act as buttons; everything else types
+  static int mapText(uint8_t kc) {
+    switch (kc) {
+      case 0x52: return B_UP;
+      case 0x51: return B_DOWN;
+      case 0x50: return B_LEFT;
+      case 0x4F: return B_RIGHT;
+      case 0x28: case 0x58: return B_A;       // Enter, keypad Enter
+      case 0x29: return B_B;                  // Esc
+      case 0x2B: return B_TAB;                // Tab
+    }
+    return -1;
+  }
+  // US keyboard layout
+  static char toChar(uint8_t kc, bool shift) {
+    if (kc >= 0x04 && kc <= 0x1D) { char c = (char)('a' + (kc - 0x04)); return shift ? (char)(c - 32) : c; }
+    if (kc >= 0x1E && kc <= 0x27) {
+      static const char num[] = "1234567890", sym[] = "!@#$%^&*()";
+      return shift ? sym[kc - 0x1E] : num[kc - 0x1E];
+    }
+    switch (kc) {
+      case 0x2C: return ' ';
+      case 0x2D: return shift ? '_' : '-';
+      case 0x2E: return shift ? '+' : '=';
+      case 0x2F: return shift ? '{' : '[';
+      case 0x30: return shift ? '}' : ']';
+      case 0x31: return shift ? '|' : '\\';
+      case 0x33: return shift ? ':' : ';';
+      case 0x34: return shift ? '"' : '\'';
+      case 0x35: return shift ? '~' : '`';
+      case 0x36: return shift ? '<' : ',';
+      case 0x37: return shift ? '>' : '.';
+      case 0x38: return shift ? '?' : '/';
+    }
+    return 0;
+  }
+  void pushChar(char c) {
+    uint8_t n = (uint8_t)((chHead + 1) % sizeof(chq));
+    if (n == chTail) return;              // full: drop
+    chq[chHead] = c; chHead = n;
+  }
+  char getChar() {                        // next typed character, 0 if none
+    if (chTail == chHead) return 0;
+    char c = chq[chTail]; chTail = (uint8_t)((chTail + 1) % sizeof(chq));
+    return c;
+  }
+  void clearChars() { chHead = chTail = 0; }
 
   static int map(uint8_t kc) {
     switch (kc) {
@@ -216,10 +276,23 @@ struct Input {
     return -1;
   }
 
-  // Called with each 8-byte keyboard report (keys = the 6 keycode bytes)
-  void onHid(const uint8_t keys[6]) {
+  // Called with each 8-byte keyboard report (keys = the 6 keycode bytes, mod = modifier byte)
+  void onHid(const uint8_t keys[6], uint8_t mod = 0) {
     bool now[B_COUNT] = {};
+    bool shift = (mod & 0x22) != 0, bk = false;
     for (int i = 0; i < 6; i++) {
+      if (textMode && keys[i] >= 0x04) {  // AI Chat typing
+        bool was = false;
+        for (int j = 0; j < 6; j++) if (prevKeys[j] == keys[i]) was = true;
+        if (keys[i] == 0x2A) { bk = true; if (!was) bkspNew = true; continue; }
+        char c = toChar(keys[i], shift);
+        if (c) { if (!was) pushChar(c); continue; }
+        int tb = mapText(keys[i]);
+        if (tb < 0) continue;
+        now[tb] = true;
+        if (!was) pending[tb] = true;
+        continue;
+      }
       int b = map(keys[i]);
       if (b < 0) continue;
       now[b] = true;
@@ -227,11 +300,12 @@ struct Input {
       for (int j = 0; j < 6; j++) if (prevKeys[j] == keys[i]) was = true;
       if (!was) pending[b] = true;
     }
+    bkspHeld = bk;
     memcpy(rawHeld, now, sizeof(now));
     memcpy(prevKeys, keys, 6);
   }
 
-  void releaseAll() { memset(rawHeld, 0, sizeof(rawHeld)); memset(prevKeys, 0, 6); }
+  void releaseAll() { memset(rawHeld, 0, sizeof(rawHeld)); memset(prevKeys, 0, 6); bkspHeld = false; }
 
   // Call once per frame before the UI/game update
   void frame(uint32_t now) {
@@ -246,6 +320,9 @@ struct Input {
         rep[b] = true; lastRep[b] = now;
       }
     }
+    // AI Chat backspace: one delete on press, then repeats while held
+    if (bkspNew) { pushChar('\b'); bkspNew = false; bkspStart = bkspLast = now; }
+    else if (bkspHeld && now - bkspStart > 400 && now - bkspLast > 60) { pushChar('\b'); bkspLast = now; }
   }
   uint32_t heldMs(Btn b, uint32_t now) const { return held[b] ? now - holdStart[b] : 0; }
 };
@@ -259,6 +336,15 @@ int      plat_loadInt(const char* key, int def);
 void     plat_saveInt(const char* key, int value);
 int      plat_kbState();                            // 0 scanning, 1 connecting, 2 paired, 3 ready
 void     plat_setFlip(bool flip);                    // rotate the screen 180 degrees
+// AI Chat
+void     plat_loadStr(const char* key, char* out, int max);   // "" if missing
+void     plat_saveStr(const char* key, const char* value);
+void     plat_wifiOn(const char* ssid, const char* pass);
+void     plat_wifiOff();
+int      plat_wifiStatus();                         // 0 off, 1 connecting, 2 connected, 3 not found, 4 failed, 5 timed out
+bool     plat_geminiStart(const char* key, const char* question);   // false if busy
+int      plat_geminiState();                        // 0 idle, 1 sending, 2 answer, 3 error
+const char* plat_geminiText();                      // the answer, or the error message
 
 #include <stdio.h>
 
@@ -929,6 +1015,270 @@ struct Game2048 : Game {
 };
 
 
+// ================= AI Chat (Google Gemini) =================
+// Its own screen, like a game. Type a question, ENTER sends it to Gemini over WiFi.
+// WiFi name/password (typed in, saved once connected) and the Gemini API key are set inside AI Chat (TAB or /setup).
+// WiFi is only switched on while AI Chat is open, so the games run exactly as before.
+struct AiChatGame : Game {
+  enum Mode { M_CHAT, M_SETUP, M_EDIT } mode = M_CHAT;
+  enum Res { R_NONE, R_SENDING, R_ANSWER, R_ERROR } res = R_NONE;
+  static const int QMAX = 300;
+  char ssid[33] = "", pass[65] = "", key[129] = "";
+  char q[QMAX + 1] = ""; int qLen = 0;          // question being typed
+  char asked[QMAX + 1] = "";                     // last question sent
+  char msg[200] = "";                            // local error text
+  const char* body = "";                         // answer or error being shown
+  uint32_t sentAt = 0;
+  // wrapped lines for the chat view
+  struct Line { const char* p; uint16_t len; uint8_t kind; };   // kind 0 question, 1 answer, 2 error
+  static const int MAXL = 420; Line lines[MAXL]; int nL = 0;
+  bool dirty = true; float scroll = 0, scrollT = 0;
+  static const int VIEW_TOP = 46, VIEW_BOT = 208, LH = 17;
+  // setup / edit
+  int setSel = 0;
+  bool wifiUnsaved = false;                      // typed WiFi name/password, saved only after it connects
+  int editWhat = 0; char ebuf[129] = ""; int eLen = 0; Mode editBack = M_SETUP;
+
+  const char* saveKey() override { return "aichat"; }
+  void begin() override {
+    phase = PLAY; mode = M_CHAT; res = R_NONE; qLen = 0; q[0] = 0; asked[0] = 0; body = ""; dirty = true; scroll = scrollT = 0;
+    plat_loadStr("ai_ssid", ssid, sizeof(ssid));
+    plat_loadStr("ai_pass", pass, sizeof(pass));
+    plat_loadStr("gem_key", key, sizeof(key));
+    if (ssid[0]) plat_wifiOn(ssid, pass);
+    if (!ssid[0] || !key[0]) { mode = M_SETUP; setSel = !ssid[0] ? 0 : 2; }
+  }
+  const char* wifiText() {
+    if (!ssid[0]) return "NOT SET";
+    switch (plat_wifiStatus()) {
+      case 2: return "CONNECTED";
+      case 1: return "CONNECTING...";
+      case 3: return "NETWORK NOT FOUND (2.4 GHZ ONLY)";
+      case 4: return "CONNECT FAILED - CHECK PASSWORD";
+      case 5: return "CAN'T CONNECT - CHECK NETWORK/PASSWORD";
+    }
+    return "OFF";
+  }
+  void showError(const char* s) { snprintf(msg, sizeof(msg), "%s", s); body = msg; res = R_ERROR; dirty = true; scrollT = 0; }
+  void send(uint32_t now) {
+    if (res == R_SENDING || qLen == 0) return;
+    if (strcmp(q, "/setup") == 0) { qLen = 0; q[0] = 0; mode = M_SETUP; setSel = 0; return; }
+    snprintf(asked, sizeof(asked), "%s", q);
+    if (!key[0]) { showError("No Gemini API key. Press TAB (or type /setup) and add your key."); return; }
+    if (!ssid[0]) { showError("No WiFi set up. Press TAB (or type /setup) and pick a network."); return; }
+    int ws = plat_wifiStatus();
+    if (ws != 2) {
+      char b[200];
+      if (ws == 1) snprintf(b, sizeof(b), "No WiFi yet: still connecting to %s. Wait a few seconds, then press ENTER again.", ssid);
+      else snprintf(b, sizeof(b), "No WiFi: %s. Press TAB to check the network and password.", wifiText());
+      showError(b); return;
+    }
+    if (!plat_geminiStart(key, q)) { showError("Still finishing the last request. Try again in a moment."); return; }
+    qLen = 0; q[0] = 0; res = R_SENDING; body = ""; sentAt = now; dirty = true; scrollT = 0;
+  }
+
+  // ---- update ----
+  bool update(Input& in, uint32_t now, uint32_t) override {
+    in.textMode = (mode == M_CHAT || mode == M_EDIT);
+    if (wifiUnsaved && plat_wifiStatus() == 2) {   // connected: now save the name + password
+      plat_saveStr("ai_ssid", ssid); plat_saveStr("ai_pass", pass); wifiUnsaved = false;
+    }
+    if (mode == M_CHAT) {
+      if (in.pressed[B_B]) { in.textMode = false; in.clearChars(); plat_wifiOff(); return false; }   // ESC = back to games
+      for (char c; (c = in.getChar()) != 0;) {
+        if (c == '\b') { if (qLen > 0) q[--qLen] = 0; }
+        else if (qLen < QMAX) { q[qLen++] = c; q[qLen] = 0; }
+      }
+      if (in.pressed[B_TAB]) { mode = M_SETUP; setSel = 0; in.clearChars(); return true; }
+      if (in.pressed[B_A]) send(now);
+      if (in.rep[B_UP]) scrollT -= LH * 2;
+      if (in.rep[B_DOWN]) scrollT += LH * 2;
+      if (res == R_SENDING) {
+        int s = plat_geminiState();
+        if (s == 2 || s == 3) { body = plat_geminiText(); res = s == 2 ? R_ANSWER : R_ERROR; dirty = true; scrollT = 0; }
+      }
+    } else if (mode == M_SETUP) {
+      if (in.rep[B_UP]) setSel = (setSel + 3) % 4;
+      if (in.rep[B_DOWN]) setSel = (setSel + 1) % 4;
+      if (in.pressed[B_B] || (in.pressed[B_A] && setSel == 3)) {
+        if (ssid[0]) plat_wifiOn(ssid, pass);
+        mode = M_CHAT; in.clearChars(); return true;
+      }
+      if (in.pressed[B_A]) {
+        if (setSel == 0) openEdit(0, ssid);
+        else if (setSel == 1) openEdit(1, pass);
+        else if (setSel == 2) openEdit(2, key);
+        in.clearChars();
+      }
+    } else if (mode == M_EDIT) {
+      for (char c; (c = in.getChar()) != 0;) {
+        if (c == '\b') { if (eLen > 0) ebuf[--eLen] = 0; }
+        else if (eLen < editMax()) { ebuf[eLen++] = c; ebuf[eLen] = 0; }
+      }
+      // Serial Monitor input: type on your computer keyboard (handles hyphens etc.)
+      while (Serial.available()) {
+        char c = Serial.read();
+        if (c == '\n' || c == '\r') {            // Enter = save
+          if (editWhat == 0) { snprintf(ssid, sizeof(ssid), "%s", ebuf); wifiUnsaved = true; setSel = 1; }
+          else if (editWhat == 1) { snprintf(pass, sizeof(pass), "%s", ebuf); wifiUnsaved = true; setSel = key[0] ? 3 : 2; }
+          else {
+            int o = 0; for (int i = 0; ebuf[i]; i++) if (ebuf[i] != ' ') key[o++] = ebuf[i];
+            key[o] = 0; plat_saveStr("gem_key", key); setSel = 3;
+          }
+          memset(ebuf, 0, sizeof(ebuf)); eLen = 0;
+          mode = M_SETUP; in.clearChars();
+          break;
+        }
+        if (c == 8 || c == 127) { if (eLen > 0) ebuf[--eLen] = 0; }   // backspace
+        else if (c >= 32 && c < 127 && eLen < editMax()) { ebuf[eLen++] = c; ebuf[eLen] = 0; }
+      }
+      if (in.pressed[B_B]) { mode = M_SETUP; in.clearChars(); return true; }        // cancel, keep old value
+      if (in.pressed[B_A]) {
+        if (editWhat == 0) { snprintf(ssid, sizeof(ssid), "%s", ebuf); wifiUnsaved = true; setSel = 1; }
+        else if (editWhat == 1) { snprintf(pass, sizeof(pass), "%s", ebuf); wifiUnsaved = true; setSel = key[0] ? 3 : 2; }
+        else {
+          int o = 0; for (int i = 0; ebuf[i]; i++) if (ebuf[i] != ' ') key[o++] = ebuf[i];   // keys never contain spaces
+          key[o] = 0; plat_saveStr("gem_key", key); setSel = 3;
+        }
+        memset(ebuf, 0, sizeof(ebuf)); eLen = 0;
+        mode = M_SETUP; in.clearChars();
+      }
+    }
+    return true;
+  }
+  int editMax() { return editWhat == 0 ? 32 : editWhat == 1 ? 64 : 128; }
+  void openEdit(int what, const char* cur) {
+    editWhat = what; snprintf(ebuf, sizeof(ebuf), "%s", cur); eLen = strlen(ebuf); mode = M_EDIT;
+  }
+
+  // ---- word wrap (measures with the GFX font glyph widths) ----
+  static const GFXfont* fontFor(uint8_t kind) { return kind == 0 ? &FreeSansBold9pt7b : &FreeSans9pt7b; }
+  static int cw(const GFXfont* f, char c) {
+    if ((uint8_t)c < f->first || (uint8_t)c > f->last) c = '?';
+    return f->glyph[(uint8_t)c - f->first].xAdvance;
+  }
+  void addLine(const char* p, int len, uint8_t kind) { if (nL < MAXL) { lines[nL].p = p; lines[nL].len = len; lines[nL].kind = kind; nL++; } }
+  void wrap(const char* s, uint8_t kind, int maxW) {
+    const GFXfont* f = fontFor(kind);
+    const char* ls = s; int w = 0; const char* lastSp = nullptr;
+    for (const char* p = s; ; p++) {
+      if (*p == 0 || *p == '\n') { addLine(ls, p - ls, kind); if (!*p) return; ls = p + 1; w = 0; lastSp = nullptr; continue; }
+      if (*p == ' ') lastSp = p;
+      w += cw(f, *p);
+      if (w > maxW && p > ls) {
+        if (lastSp && lastSp > ls) { addLine(ls, lastSp - ls, kind); ls = lastSp + 1; }
+        else { addLine(ls, p - ls, kind); ls = p; }                    // very long word: break it
+        w = 0; lastSp = nullptr;
+        for (const char* r = ls; r <= p; r++) { w += cw(f, *r); if (*r == ' ') lastSp = r; }
+      }
+    }
+  }
+  void layout() {
+    nL = 0;
+    if (asked[0]) { wrap(asked, 0, 296); addLine("", 0, 1); }
+    if ((res == R_ANSWER || res == R_ERROR) && body) wrap(body, res == R_ANSWER ? 1 : 2, 296);
+    dirty = false;
+  }
+
+  // ---- drawing ----
+  void drawLineText(Canvas& g, const Line& L, int y) {
+    char buf[96]; int n = L.len < 95 ? L.len : 95;
+    memcpy(buf, L.p, n); buf[n] = 0;
+    uint16_t c = L.kind == 0 ? C_TEAL : (L.kind == 2 ? C_RED : rgb(218, 218, 222));
+    text(g, L.kind == 0 ? F_BOLD : F_REG, 12, y, buf, c);
+  }
+  void drawChat(Canvas& g, uint32_t now) {
+    if (dirty) layout();
+    int contentH = nL * LH + (res == R_SENDING ? LH : 0);
+    int maxScroll = contentH - (VIEW_BOT - VIEW_TOP); if (maxScroll < 0) maxScroll = 0;
+    if (scrollT < 0) scrollT = 0;
+    if (scrollT > maxScroll) scrollT = maxScroll;
+    scroll += (scrollT - scroll) * 0.35f;
+    if (nL == 0 && res != R_SENDING) {
+      textC(g, F_BOLD, SW / 2, 84, "Ask Gemini anything", C_WHITE);
+      char b[64];
+      snprintf(b, sizeof(b), "WIFI: %s", wifiText());
+      textC(g, F_SMALL, SW / 2, 104, b, plat_wifiStatus() == 2 ? C_GREEN : C_ORANGE);
+      textC(g, F_SMALL, SW / 2, 118, key[0] ? "GEMINI KEY: SAVED" : "GEMINI KEY: NOT SET", key[0] ? C_GREEN : C_ORANGE);
+      textC(g, F_SMALL, SW / 2, 146, "ENTER send   ESC back to games", C_DIM);
+      textC(g, F_SMALL, SW / 2, 160, "TAB (or type /setup) = WiFi + key", C_DIM);
+      textC(g, F_SMALL, SW / 2, 174, "UP / DOWN ARROWS scroll the answer", C_DIM);
+    }
+    int y0 = VIEW_TOP + 13 - (int)(scroll + 0.5f);
+    for (int i = 0; i < nL; i++) {
+      int y = y0 + i * LH;
+      if (y < VIEW_TOP - LH || y > VIEW_BOT + LH) continue;
+      if (lines[i].len) drawLineText(g, lines[i], y);
+    }
+    if (res == R_SENDING) {
+      char b[16]; int dots = (now / 350) % 4;
+      snprintf(b, sizeof(b), "Sending%.*s", dots, "...");
+      text(g, F_REG, 12, y0 + nL * LH, b, C_YELLOW);
+    }
+    if (maxScroll > 0) {                                       // scroll bar
+      int vh = VIEW_BOT - VIEW_TOP, bh = vh * vh / (contentH > 0 ? contentH : 1); if (bh < 12) bh = 12;
+      int by = VIEW_TOP + (int)((vh - bh) * scroll / maxScroll);
+      g.fillRect(SW - 4, VIEW_TOP, 2, vh, C_LINE); g.fillRect(SW - 4, by, 2, bh, C_SOFT);
+    }
+    // input bar
+    g.fillRect(0, VIEW_BOT + 1, SW, SH - VIEW_BOT - 1, C_BG);
+    rrect(g, 6, 212, SW - 12, 24, 8, C_CARD);
+    if (qLen == 0) text(g, F_SMALL, 16, 221, res == R_SENDING ? "waiting for Gemini..." : "type a question, ENTER to send", C_DIM);
+    else {
+      const char* s = q + qLen; int w = 0;                       // show the end of long questions
+      while (s > q && w + cw(&FreeSans9pt7b, s[-1]) < SW - 44) { s--; w += cw(&FreeSans9pt7b, *s); }
+      text(g, F_REG, 14, 229, s, C_WHITE);
+      if ((now / 500) % 2) g.fillRect(14 + w + 2, 217, 2, 14, C_TEAL);
+    }
+  }
+  void drawSetup(Canvas& g, uint32_t now) {
+    const char* names[4] = {"WiFi network", "WiFi password", "Gemini API key", "Done"};
+    for (int i = 0; i < 4; i++) {
+      int y = 46 + i * 42; bool s = i == setSel;
+      rrect(g, 10, y, 300, 36, 10, s ? C_WHITE : C_CARD);
+      uint16_t tc = s ? C_BG : C_WHITE, sc = s ? rgb(90, 90, 96) : C_DIM;
+      text(g, F_BOLD, 22, y + 17, names[i], tc);
+      char sub[48] = "";
+      if (i == 0) { if (!ssid[0]) snprintf(sub, sizeof(sub), "NOT SET - ENTER TO TYPE IT"); else snprintf(sub, sizeof(sub), wifiUnsaved ? "%.26s (NOT SAVED YET)" : "%s", ssid); }
+      if (i == 1) { if (pass[0]) snprintf(sub, sizeof(sub), "SAVED (%d CHARACTERS)", (int)strlen(pass)); else snprintf(sub, sizeof(sub), "NONE (OPEN NETWORK)"); }
+      if (i == 2) { if (key[0]) snprintf(sub, sizeof(sub), "SAVED (%d CHARACTERS)", (int)strlen(key)); else snprintf(sub, sizeof(sub), "NOT SET - FROM AISTUDIO.GOOGLE.COM"); }
+      if (i == 3) snprintf(sub, sizeof(sub), "WIFI: %s", wifiText());
+      text(g, F_SMALL, 22, y + 23, sub, sc);
+    }
+    g.fillRect(0, 216, SW, SH - 216, C_BG);
+    textR(g, F_SMALL, SW - 12, 224, "D/X move   ENTER select   ESC back", C_DIM);
+  }
+  void drawEdit(Canvas& g, uint32_t now) {
+    text(g, F_BOLD, 12, 62, editWhat == 0 ? "WiFi name (2.4 GHz)" : editWhat == 1 ? "WiFi password" : "Gemini API key", C_WHITE);
+    textR(g, F_SMALL, 308, 54, editWhat == 2 ? "NO SPACES" : "CASE SENSITIVE", C_DIM);
+    rrect(g, 8, 70, SW - 16, 138, 10, C_CARD);
+    g.setFont(nullptr); g.setTextSize(2); g.setTextWrap(false);
+    const int PER = 24;                                         // 12 px per character
+    int shownFrom = eLen > PER * 6 ? ((eLen - PER * 6) / PER + 1) * PER : 0;
+    int cx = 16, cy = 78;
+    for (int i = shownFrom; i <= eLen; i++) {
+      int k = i - shownFrom; cx = 16 + (k % PER) * 12; cy = 78 + (k / PER) * 21;
+      if (i == eLen) break;
+      char c = ebuf[i];
+      uint16_t col = (c >= '0' && c <= '9') ? C_TEAL : ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) ? C_WHITE : C_YELLOW;
+      g.drawChar(cx, cy, c, col, C_CARD, 2);
+    }
+    if ((now / 500) % 2) g.fillRect(cx, cy + 15, 10, 2, C_TEAL);
+    g.setTextSize(1);
+    g.fillRect(0, 216, SW, SH - 216, C_BG);
+    char b[48]; snprintf(b, sizeof(b), "%d/%d", eLen, editMax());
+    text(g, F_SMALL, 12, 224, b, C_DIM);
+    textR(g, F_SMALL, SW - 12, 224, "ENTER save   ESC cancel   BKSP delete", C_DIM);
+    text(g, F_SMALL, 12, 232, "TIP: type via Serial Monitor too", C_DIM);
+  }
+  void draw(Canvas& g, uint32_t now) override {
+    g.fillScreen(C_BG);
+    if (mode == M_CHAT) drawChat(g, now);
+    else if (mode == M_SETUP) drawSetup(g, now);
+    else drawEdit(g, now);
+  }
+};
+
 struct MenuItem { const char* name; const char* key; uint16_t color; Icon icon; };
 static const MenuItem MENU[] = {
   {"Snake",    "snake",    C_GREEN,  IC_SNAKE},
@@ -939,11 +1289,13 @@ static const MenuItem MENU[] = {
   {"2048",     "2048",     C_PINK,   IC_2048},
   {"Settings", nullptr,    C_SOFT,   IC_SETTINGS},
   {"About",    nullptr,    C_SOFT,   IC_ABOUT},
+  {"AI Chat",  nullptr,    C_BLUE,   IC_AI},
 };
 static const int N_MENU = sizeof(MENU) / sizeof(MENU[0]);
 static const int N_GAMES = 6;
+static const int AI_CHAT = 8;   // menu index of AI Chat
 
-// Menu grid geometry (4 x 2 tiles, landscape)
+// Menu grid geometry (4 x 2 tiles visible, landscape; the grid scrolls down one row for AI Chat)
 static const int TILE_W = 72, TILE_H = 78, TILE_X0 = 7, TILE_GAP = 6, TILE_Y0 = 48;
 static inline int tileX(int i) { return TILE_X0 + (i % 4) * (TILE_W + TILE_GAP); }
 static inline int tileY(int i) { return TILE_Y0 + (i / 4) * (TILE_H + TILE_GAP); }
@@ -985,6 +1337,13 @@ static void drawIcon(Canvas& g, Icon ic, int x, int y, uint16_t col) {
       g.fillCircle(cx, cy, 8, k); g.fillCircle(cx, cy, 3, col); break;
     case IC_ABOUT:
       g.fillCircle(cx, y + 9, 3, k); g.fillRoundRect(cx - 2, y + 14, 5, 13, 2, k); break;
+    case IC_AI: {                       // the little computer, with a sparkle
+      Mascot m; m.cx = cx; m.cy = cy - 1; m.s = 0.1f;
+      m.body = k; m.eye = k; m.bg = col;
+      drawMascot(g, m);
+      drawSparkle(g, x + 28, y + 6, 4, C_WHITE);
+      break;
+    }
   }
 }
 
@@ -993,6 +1352,7 @@ struct App {
   uint32_t t0 = 0;
   int sel = 0;
   float hx = TILE_X0, hy = TILE_Y0;   // gliding highlight position
+  float my = 0;                       // menu grid scroll (px), > 0 only when AI Chat's row is selected
   uint32_t menuAt = 0;
   int bests[N_GAMES] = {};
   Game* games[N_GAMES];
@@ -1003,6 +1363,7 @@ struct App {
   static const uint32_t BOOT_LEN = 4150;
 
   SnakeGame snake; BlocksGame blocks; PongGame pong; BreakoutGame breakout; FlappyGame flappy; Game2048 g2048;
+  AiChatGame aiChat;
 
   void begin() {
     games[0] = &snake; games[1] = &blocks; games[2] = &pong;
@@ -1025,7 +1386,7 @@ struct App {
       case BOOT:  if (t > BOOT_LEN || (t > 400 && in.anyPressed)) go(INTRO, now); break;
       case INTRO: if (t > 1100) go(MENU_S, now); break;
       case MENU_S: updateMenu(in, now); break;
-      case LAUNCH: if (t > 480) { cur = games[sel]; cur->begin(); go(GAME, now); } break;
+      case LAUNCH: if (t > 480) { cur = sel < N_GAMES ? games[sel] : (Game*)&aiChat; cur->begin(); go(GAME, now); } break;
       case GAME:  if (!cur->update(in, now, dt)) { loadBests(); openMenu(now); } break;
       case SETTINGS: updateSettings(in, now); break;
       case ABOUT: if (in.pressed[B_B] || in.pressed[B_A]) openMenu(now); break;
@@ -1033,13 +1394,15 @@ struct App {
     float k = 1 - powf(0.0005f, dt / 1000.0f * 1.6f);
     hx = lerpf(hx, tileX(sel), k);
     hy = lerpf(hy, tileY(sel), k);
+    my = lerpf(my, sel / 4 >= 2 ? (float)(TILE_H + TILE_GAP) : 0.0f, k);
   }
   void updateMenu(Input& in, uint32_t now) {
     if (in.rep[B_LEFT])  sel = (sel + N_MENU - 1) % N_MENU;
     if (in.rep[B_RIGHT]) sel = (sel + 1) % N_MENU;
-    if (in.rep[B_UP] || in.rep[B_DOWN]) sel = (sel + 4) % N_MENU;
+    if (in.rep[B_DOWN]) sel = sel + 4 < N_MENU ? sel + 4 : sel % 4;
+    else if (in.rep[B_UP]) { if (sel >= 4) sel -= 4; else { int s = sel; while (s + 4 < N_MENU) s += 4; sel = s; } }
     if (in.pressed[B_A]) {
-      if (sel < N_GAMES) go(LAUNCH, now);
+      if (sel < N_GAMES || sel == AI_CHAT) go(LAUNCH, now);
       else if (sel == N_GAMES) { setSel = 0; resetArmAt = resetDoneAt = 0; go(SETTINGS, now); }
       else go(ABOUT, now);
     }
@@ -1069,7 +1432,7 @@ struct App {
       case INTRO:  drawIntro(g, t, now); break;
       case MENU_S: drawMenu(g, now, true); break;
       case LAUNCH: drawLaunch(g, t, now); break;
-      case GAME:   cur->draw(g, now); break;
+      case GAME:   cur->draw(g, now); if (cur == &aiChat) drawHeader(g, now, "AI Chat"); break;
       case SETTINGS: drawSettings(g, now); break;
       case ABOUT:  drawAbout(g, now); break;
     }
@@ -1222,14 +1585,14 @@ struct App {
     for (int i = 0; i < N_MENU; i++) {
       float in = seg(now, menuAt + i * 40, menuAt + i * 40 + 320);
       if (in <= 0) continue;
-      int x = tileX(i), y = tileY(i) + ir((1 - easeOutBack(in)) * 24);
+      int x = tileX(i), y = tileY(i) - ir(my) + ir((1 - easeOutBack(in)) * 24);
       rrect(g, x, y, TILE_W, TILE_H, 12, blend(C_BG, C_CARD, in));
     }
-    if (highlight) rrect(g, hx, hy, TILE_W, TILE_H, 12, C_WHITE);
+    if (highlight) rrect(g, hx, hy - my, TILE_W, TILE_H, 12, C_WHITE);
     for (int i = 0; i < N_MENU; i++) {
       float in = seg(now, menuAt + i * 40, menuAt + i * 40 + 320);
       if (in <= 0) continue;
-      int x = tileX(i), y = tileY(i) + ir((1 - easeOutBack(in)) * 24);
+      int x = tileX(i), y = tileY(i) - ir(my) + ir((1 - easeOutBack(in)) * 24);
       bool isSel = highlight && i == sel && fabsf(hx - x) < TILE_W / 2 && fabsf(hy - tileY(i)) < TILE_H / 2;
       drawTileContent(g, i, x, y, isSel);
     }
@@ -1243,7 +1606,7 @@ struct App {
     drawMenu(g, now, true);
     float k = easeInOutCubic(seg(t, 0, 320));
     uint16_t c = blend(MENU[sel].color, C_BG, seg(t, 320, 480));
-    rrect(g, lerpf(hx, 0, k), lerpf(hy, 0, k), lerpf(TILE_W, SW, k), lerpf(TILE_H, SH, k), lerpf(12, 0, k), c);
+    rrect(g, lerpf(hx, 0, k), lerpf(hy - my, 0, k), lerpf(TILE_W, SW, k), lerpf(TILE_H, SH, k), lerpf(12, 0, k), c);
     float nk = seg(t, 120, 320) * (1 - seg(t, 330, 470));
     if (nk > 0) textC(g, F_HUGE, SW / 2, ir(132 + 12 * (1 - easeOutCubic(nk))), MENU[sel].name, blend(c, C_BG, nk));
   }
@@ -1318,6 +1681,291 @@ int  plat_loadInt(const char* key, int def) { return prefs.getInt(key, def); }
 void plat_saveInt(const char* key, int v) { prefs.putInt(key, v); }
 int  plat_kbState() { return g_kbState; }
 void plat_setFlip(bool flip) { tft.setRotation(flip ? (SCREEN_ROTATION + 2) % 4 : SCREEN_ROTATION); }
+
+
+// ---------------- AI Chat: WiFi, saved text, Google Gemini API ----------------
+// Saved strings (AI Chat WiFi + Gemini key). Stored in the ESP32 flash (NVS, not encrypted). Never printed.
+void plat_loadStr(const char* key, char* out, int max) {
+  out[0] = 0;
+  if (!prefs.isKey(key)) return;
+  String v = prefs.getString(key, "");
+  snprintf(out, max, "%s", v.c_str());
+}
+void plat_saveStr(const char* key, const char* v) { prefs.putString(key, v); }
+
+static volatile bool g_wifiOn = false, g_wifiWantOff = false;
+static uint32_t g_wifiStart = 0;
+static volatile int g_gemState = 0;          // 0 idle, 1 sending, 2 answer ready, 3 error
+void plat_wifiOn(const char* ssid, const char* pass) {
+  g_wifiWantOff = false;
+  WiFi.persistent(false);                    // don't let the WiFi driver save its own copy
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, (pass && pass[0]) ? pass : nullptr);
+  g_wifiOn = true; g_wifiStart = millis();
+}
+static void wifiOffNow() { WiFi.disconnect(false); WiFi.mode(WIFI_OFF); g_wifiOn = false; }
+void plat_wifiOff() {                        // called when leaving AI Chat (waits for a running request)
+  if (g_gemState == 1) g_wifiWantOff = true; else wifiOffNow();
+}
+int plat_wifiStatus() {                      // 0 off, 1 connecting, 2 connected, 3 not found, 4 failed, 5 timed out
+  if (!g_wifiOn) return 0;
+  wl_status_t s = WiFi.status();
+  if (s == WL_CONNECTED) return 2;
+  if (s == WL_NO_SSID_AVAIL) return 3;
+  if (s == WL_CONNECT_FAILED) return 4;
+  if (millis() - g_wifiStart > 20000) return 5;
+  return 1;
+}
+
+// Gemini API: POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent
+// Key goes in the "x-goog-api-key" header (never in the URL, never printed).
+// Change the model here if Google retires it (list: ai.google.dev/gemini-api/docs/models).
+#define GEMINI_MODEL "gemini-3.5-flash-lite"
+static const char GEMINI_URL[] = "https://generativelanguage.googleapis.com/v1beta/models/" GEMINI_MODEL ":generateContent";
+static const uint32_t GEMINI_TIMEOUT_MS = 30000;
+// Root certificates for generativelanguage.googleapis.com (Google Trust Services GTS Root R1 + R4,
+// from pki.goog). Built in so the connection is verified on any ESP32 Arduino core.
+static const char GEMINI_ROOT_CAS[] =
+  "-----BEGIN CERTIFICATE-----\n"
+  "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\n"
+  "bP6MvPJwNQzcmRk13NfIRmPVNnGuV/u3gm3c\n"
+  "-----END CERTIFICATE-----\n"
+  "-----BEGIN CERTIFICATE-----\n"
+  "MIICCTCCAY6gAwIBAgINAgPlwGjvYxqccpBQUjAKBggqhkjOPQQDAzBHMQswCQYD\n"
+  "VQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEUMBIG\n"
+  "A1UEAxMLR1RTIFJvb3QgUjQwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAwMDAw\n"
+  "WjBHMQswCQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2Vz\n"
+  "IExMQzEUMBIGA1UEAxMLR1RTIFJvb3QgUjQwdjAQBgcqhkjOPQIBBgUrgQQAIgNi\n"
+  "AATzdHOnaItgrkO4NcWBMHtLSZ37wWHO5t5GvWvVYRg1rkDdc/eJkTBa6zzuhXyi\n"
+  "QHY7qca4R9gq55KRanPpsXI5nymfopjTX15YhmUPoYRlBtHci8nHc8iMai/lxKvR\n"
+  "HYqjQjBAMA4GA1UdDwEB/wQEAwIBhjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQW\n"
+  "BBSATNbrdP9JNqPV2Py1PsVq8JQdjDAKBggqhkjOPQQDAwNpADBmAjEA6ED/g94D\n"
+  "9J+uHXqnLrmvT/aDHQ4thQEd0dlq7A/Cr8deVl5c1RxYIigL9zC2L7F8AjEA8GE8\n"
+  "p/SgguMh1YQdc4acLa/KNJvxn7kjNuK8YAOdgLOaVsjh4rsUecrNIdSUtUlD\n"
+  "-----END CERTIFICATE-----\n";
+
+static const int GEM_Q_CAP = 320, GEM_OUT_CAP = 6144;
+static char g_gemKey[132];
+static char g_gemQ[GEM_Q_CAP];
+static char* g_gemOut = nullptr;             // answer or error text (ASCII only: the screen fonts are ASCII)
+
+// Append a Unicode code point as plain ASCII
+static void gemPutCp(char* out, int& o, int max, uint32_t cp) {
+  const char* s = nullptr; char one[2] = {0, 0};
+  if (cp == '\t') cp = ' ';
+  if (cp == '\n' || (cp >= 0x20 && cp < 0x7F)) { one[0] = (char)cp; s = one; }
+  else if (cp == 0x2018 || cp == 0x2019 || cp == 0x2032) s = "'";
+  else if (cp == 0x201C || cp == 0x201D || cp == 0x2033) s = "\"";
+  else if (cp == 0x2013 || cp == 0x2014 || cp == 0x2212) s = "-";
+  else if (cp == 0x2026) s = "...";
+  else if (cp == 0x2022 || cp == 0x00B7) s = "*";
+  else if (cp == 0x00A0 || cp == 0x2009 || cp == 0x202F) s = " ";
+  else if (cp == 0x00B0) s = " deg";
+  else if (cp == 0x00D7) s = "x";
+  else if (cp == 0x00F7) s = "/";
+  else if (cp == 0x2192) s = "->";
+  else if (cp == 0x2264) s = "<=";
+  else if (cp == 0x2265) s = ">=";
+  else if (cp >= 0x00C0 && cp <= 0x00FF) {    // accented Latin letters -> plain letter
+    static const char map[] = "AAAAAAACEEEEIIIIDNOOOOOxOUUUUYPsaaaaaaaceeeeiiiidnooooo/ouuuuypy";
+    one[0] = map[cp - 0xC0]; s = one;
+  }
+  else if (cp == 0x200B || cp == 0xFE0F || (cp >= 0x1F000 && cp <= 0x1FAFF)) s = "";   // zero-width / emoji
+  else s = "?";
+  while (*s && o < max - 1) out[o++] = *s++;
+}
+static int gemHex4(const char* p) {
+  int v = 0;
+  for (int i = 0; i < 4; i++) {
+    char c = p[i]; v <<= 4;
+    if (c >= '0' && c <= '9') v |= c - '0'; else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10; else return -1;
+  }
+  return v;
+}
+// Decode the JSON string starting at the opening quote p. Appends to out. Returns pointer after the string.
+static const char* gemJsonStr(const char* p, char* out, int& o, int max) {
+  if (*p != '"') return p;
+  p++;
+  while (*p && *p != '"') {
+    if (*p == '\\' && p[1]) {
+      p++;
+      switch (*p) {
+        case 'n': gemPutCp(out, o, max, '\n'); p++; break;
+        case 't': gemPutCp(out, o, max, ' '); p++; break;
+        case 'r': case 'b': case 'f': p++; break;
+        case 'u': {
+          int u = gemHex4(p + 1); if (u < 0) { p++; break; }
+          uint32_t cp = u; p += 5;
+          if (u >= 0xD800 && u <= 0xDBFF && p[0] == '\\' && p[1] == 'u') {
+            int lo = gemHex4(p + 2);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00); p += 6; }
+          }
+          gemPutCp(out, o, max, cp); break;
+        }
+        default: gemPutCp(out, o, max, (uint8_t)*p); p++; break;     // \" \\ \/
+      }
+    } else {
+      uint8_t c = (uint8_t)*p;                                       // raw UTF-8
+      uint32_t cp = c; int extra = 0;
+      if (c >= 0xF0) { cp = c & 0x07; extra = 3; } else if (c >= 0xE0) { cp = c & 0x0F; extra = 2; } else if (c >= 0xC0) { cp = c & 0x1F; extra = 1; }
+      p++;
+      while (extra-- > 0 && ((uint8_t)*p & 0xC0) == 0x80) { cp = (cp << 6) | ((uint8_t)*p & 0x3F); p++; }
+      gemPutCp(out, o, max, cp);
+    }
+  }
+  return *p == '"' ? p + 1 : p;
+}
+// Find "key": (a real key, not text inside a string) at or after from. Returns pointer to the value.
+static const char* gemFind(const char* from, const char* key) {
+  char pat[40]; snprintf(pat, sizeof(pat), "\"%s\"", key);
+  for (const char* p = strstr(from, pat); p; p = strstr(p + 1, pat)) {
+    if (p > from && p[-1] == '\\') continue;
+    const char* v = p + strlen(pat);
+    while (*v == ' ' || *v == '\n' || *v == '\r' || *v == '\t') v++;
+    if (*v != ':') continue;
+    v++;
+    while (*v == ' ' || *v == '\n' || *v == '\r' || *v == '\t') v++;
+    return v;
+  }
+  return nullptr;
+}
+static void gemFail(const char* m) { snprintf(g_gemOut, GEM_OUT_CAP, "%s", m); g_gemState = 3; }
+
+static void gemRequest() {
+  if (WiFi.status() != WL_CONNECTED) { gemFail("No WiFi connection. Press TAB to check the network."); return; }
+  // Request body: {"systemInstruction":{...},"contents":[{"role":"user","parts":[{"text":"..."}]}],"generationConfig":{...}}
+  String req;
+  req.reserve(700);
+  req += "{\"systemInstruction\":{\"parts\":[{\"text\":\"You are a helpful assistant on a tiny handheld with a small screen. "
+         "Answer in plain text only: no markdown, no tables, no emoji. Keep it short (under 120 words) unless asked for more.\"}]},"
+         "\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"";
+  for (const char* p = g_gemQ; *p; p++) {
+    char c = *p;
+    if (c == '"' || c == '\\') { req += '\\'; req += c; }
+    else if ((uint8_t)c < 0x20) req += ' ';
+    else req += c;
+  }
+  req += "\"}]}],\"generationConfig\":{\"maxOutputTokens\":1024}}";
+
+  WiFiClientSecure client;
+  client.setCACert(GEMINI_ROOT_CAS);
+  client.setHandshakeTimeout(15);            // seconds
+  HTTPClient http;
+  http.setConnectTimeout(10000);
+  http.setTimeout(GEMINI_TIMEOUT_MS);
+  http.setReuse(false);
+  if (!http.begin(client, GEMINI_URL)) { memset(g_gemKey, 0, sizeof(g_gemKey)); gemFail("Could not start the connection to Gemini."); return; }
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("x-goog-api-key", g_gemKey);
+  uint32_t t0 = millis();
+  int code = http.POST(req);
+  memset(g_gemKey, 0, sizeof(g_gemKey));     // don't keep a copy of the key around
+  if (code < 0) {
+    http.end();
+    char b[160];
+    if (code == HTTPC_ERROR_READ_TIMEOUT || millis() - t0 >= GEMINI_TIMEOUT_MS)
+      snprintf(b, sizeof(b), "Timeout: Gemini did not answer within %u seconds. Try again.", (unsigned)(GEMINI_TIMEOUT_MS / 1000));
+    else if (code == HTTPC_ERROR_CONNECTION_REFUSED)
+      snprintf(b, sizeof(b), "Could not connect to Gemini (no internet, blocked network, or connection timed out).");
+    else snprintf(b, sizeof(b), "Network error talking to Gemini (%d). Check WiFi and try again.", code);
+    gemFail(b); return;
+  }
+  String resp = http.getString();
+  http.end();
+  const char* r = resp.c_str();
+
+  if (code != 200) {
+    char m[140]; int mo = 0; m[0] = 0;
+    const char* mv = gemFind(r, "message");
+    if (mv) { gemJsonStr(mv, m, mo, 120); m[mo] = 0; }
+    bool badKey = strstr(r, "API_KEY_INVALID") || strstr(r, "API key not valid") || strstr(r, "API key expired");
+    char b[260];
+    if (badKey || code == 401) snprintf(b, sizeof(b), "Bad API key: Google rejected it (%d). Press TAB and re-type your Gemini key.", code);
+    else if (code == 403) snprintf(b, sizeof(b), "API key not allowed (403): %s", m[0] ? m : "check the key and that the Gemini API is enabled.");
+    else if (code == 404) snprintf(b, sizeof(b), "Model not found (404). Change GEMINI_MODEL in the sketch. %s", m);
+    else if (code == 429) snprintf(b, sizeof(b), "Too many requests or quota used up (429). Wait a minute and try again.");
+    else if (code == 504) snprintf(b, sizeof(b), "Timeout: Gemini took too long (504). Try again.");
+    else if (code >= 500) snprintf(b, sizeof(b), "Gemini server error (%d). Try again in a moment.", code);
+    else snprintf(b, sizeof(b), "API error %d: %s", code, m[0] ? m : "unexpected reply.");
+    gemFail(b); return;
+  }
+
+  // 200 OK: {"candidates":[{"content":{"parts":[{"text":"..."}],"role":"model"},"finishReason":"STOP",...}],"promptFeedback":{...}}
+  char reason[32] = ""; int ro = 0;
+  const char* br = gemFind(r, "blockReason");
+  if (br) { gemJsonStr(br, reason, ro, sizeof(reason)); reason[ro] = 0; char b[80]; snprintf(b, sizeof(b), "Gemini blocked this question (%s).", reason); gemFail(b); return; }
+  const char* cand = gemFind(r, "candidates");
+  if (!cand) { gemFail(resp.length() ? "Unexpected reply from Gemini (no answer in it)." : "Empty reply from Gemini (connection dropped or timed out)."); return; }
+  int o = 0;
+  for (const char* p = gemFind(cand, "text"); p; p = gemFind(p, "text")) {
+    if (*p != '"') continue;
+    p = gemJsonStr(p, g_gemOut, o, GEM_OUT_CAP - 4);
+  }
+  g_gemOut[o] = 0;
+  const char* fr = gemFind(cand, "finishReason");
+  ro = 0; if (fr) { gemJsonStr(fr, reason, ro, sizeof(reason)); } reason[ro] = 0;
+  // light clean-up: drop markdown bold markers
+  int w = 0; for (int i = 0; i < o; i++) { if (g_gemOut[i] == '*' && g_gemOut[i + 1] == '*') { i++; continue; } g_gemOut[w++] = g_gemOut[i]; }
+  g_gemOut[w] = 0; o = w;
+  while (o > 0 && (g_gemOut[o - 1] == '\n' || g_gemOut[o - 1] == ' ')) g_gemOut[--o] = 0;
+  if (o == 0) {
+    char b[120];
+    if (reason[0]) snprintf(b, sizeof(b), "Gemini sent no text (finishReason %s).", reason);
+    else snprintf(b, sizeof(b), "Gemini sent no text. Try asking again.");
+    gemFail(b); return;
+  }
+  if (strcmp(reason, "MAX_TOKENS") == 0) { const char* cut = "\n[answer cut off]"; while (*cut && o < GEM_OUT_CAP - 1) g_gemOut[o++] = *cut++; g_gemOut[o] = 0; }
+  g_gemState = 2;
+}
+static void geminiTask(void*) {
+  gemRequest();
+  if (g_wifiWantOff) { g_wifiWantOff = false; wifiOffNow(); }
+  vTaskDelete(nullptr);
+}
+bool plat_geminiStart(const char* key, const char* question) {
+  if (g_gemState == 1) return false;
+  if (!g_gemOut) g_gemOut = (char*)ps_malloc(GEM_OUT_CAP);
+  if (!g_gemOut) g_gemOut = (char*)malloc(GEM_OUT_CAP);
+  if (!g_gemOut) return false;
+  g_gemOut[0] = 0;
+  snprintf(g_gemKey, sizeof(g_gemKey), "%s", key);
+  snprintf(g_gemQ, sizeof(g_gemQ), "%s", question);
+  g_gemState = 1;
+  if (xTaskCreatePinnedToCore(geminiTask, "gemini", 16384, nullptr, 1, nullptr, 0) != pdPASS) {
+    memset(g_gemKey, 0, sizeof(g_gemKey)); g_gemState = 0; return false;
+  }
+  return true;
+}
+int plat_geminiState() { return g_gemState; }
+const char* plat_geminiText() { return g_gemOut ? g_gemOut : ""; }
 
 // ---------------- BLE (same working flow as KeyboardScreenTest) ----------------
 static NimBLEUUID kHidSvcUUID((uint16_t)0x1812);
@@ -1439,6 +2087,8 @@ void setup() {
                 esp_ptr_external_ram(canvas->getBuffer()) ? "in PSRAM" : "in internal RAM", (unsigned)ESP.getFreePsram());
 
   prefs.begin("arcade", false);
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_OFF);                           // init WiFi driver at boot so later calls don't error
   g_reportQueue = xQueueCreate(32, sizeof(Report));
   xTaskCreatePinnedToCore(bleTask, "ble", 8192, nullptr, 1, nullptr, 0);
   app.begin();
@@ -1453,7 +2103,7 @@ void loop() {
   while (xQueueReceive(g_reportQueue, &r, 0) == pdTRUE) {
     const uint8_t* d = r.data; int len = r.len;
     if (len == 9 && d[0] == 0x01) { d++; len = 8; }   // report ID prefix
-    if (len == 8) input.onHid(d + 2);
+    if (len == 8) input.onHid(d + 2, d[0]);   // d[0] = modifier byte (Shift, used by AI Chat typing)
   }
   int kb = g_kbState;
   if (kb != lastKb) { if (kb != 3) input.releaseAll(); lastKb = kb; }
