@@ -1115,6 +1115,23 @@ struct AiChatGame : Game {
         if (c == '\b') { if (eLen > 0) ebuf[--eLen] = 0; }
         else if (eLen < editMax()) { ebuf[eLen++] = c; ebuf[eLen] = 0; }
       }
+      // Serial Monitor input: type on your computer keyboard (handles hyphens etc.)
+      while (Serial.available()) {
+        char c = Serial.read();
+        if (c == '\n' || c == '\r') {            // Enter = save
+          if (editWhat == 0) { snprintf(ssid, sizeof(ssid), "%s", ebuf); wifiUnsaved = true; setSel = 1; }
+          else if (editWhat == 1) { snprintf(pass, sizeof(pass), "%s", ebuf); wifiUnsaved = true; setSel = key[0] ? 3 : 2; }
+          else {
+            int o = 0; for (int i = 0; ebuf[i]; i++) if (ebuf[i] != ' ') key[o++] = ebuf[i];
+            key[o] = 0; plat_saveStr("gem_key", key); setSel = 3;
+          }
+          memset(ebuf, 0, sizeof(ebuf)); eLen = 0;
+          mode = M_SETUP; in.clearChars();
+          break;
+        }
+        if (c == 8 || c == 127) { if (eLen > 0) ebuf[--eLen] = 0; }   // backspace
+        else if (c >= 32 && c < 127 && eLen < editMax()) { ebuf[eLen++] = c; ebuf[eLen] = 0; }
+      }
       if (in.pressed[B_B]) { mode = M_SETUP; in.clearChars(); return true; }        // cancel, keep old value
       if (in.pressed[B_A]) {
         if (editWhat == 0) { snprintf(ssid, sizeof(ssid), "%s", ebuf); wifiUnsaved = true; setSel = 1; }
@@ -1252,6 +1269,7 @@ struct AiChatGame : Game {
     char b[48]; snprintf(b, sizeof(b), "%d/%d", eLen, editMax());
     text(g, F_SMALL, 12, 224, b, C_DIM);
     textR(g, F_SMALL, SW - 12, 224, "ENTER save   ESC cancel   BKSP delete", C_DIM);
+    text(g, F_SMALL, 12, 232, "TIP: type via Serial Monitor too", C_DIM);
   }
   void draw(Canvas& g, uint32_t now) override {
     g.fillScreen(C_BG);
