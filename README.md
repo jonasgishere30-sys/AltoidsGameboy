@@ -1,7 +1,7 @@
 # Altoids Gameboy
 
 A pocket game console in an Altoids tin: **ESP32-S3 + 2.4" ST7789 screen + M5Stack CardKB2 keyboard (Bluetooth)**,
-running on a 700mAh LiPo.
+running on a 750mAh LiPo.
 
 ![startup](docs/images/startup.gif)
 
