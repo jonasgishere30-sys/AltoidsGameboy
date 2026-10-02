@@ -5,7 +5,6 @@ Altoids-tin handheld game console running Arcade OS on an ESP32-S3.
 ## Firmware: Arcade OS v1.6 (Sept 30, 2026)
 
 - Compiles for ESP32-S3. Not yet tested on the physical device.
-- No WiFi or AI features on main (AI Chat is a separate unmerged PR).
 - Scrolling menu.
 - 15 games: Invaders, Asteroids, Dino, Racer, Tron, Stack, Jumper, Mines, Connect 4, Simon, and others.
 - Notes app: 6 notes saved to flash, up to 1000 characters each.
@@ -16,7 +15,7 @@ Altoids-tin handheld game console running Arcade OS on an ESP32-S3.
 - ESP32-S3 N16R8
 - 2.4 inch ST7789 display (GMT024-10 V2.1, 7-pin), backlight tied to VCC
 - Unit Card KB2 keyboard
-- 700mAh LiPo, TP4056 charger, MT3608 boost converter set to 5V
+- 750mAh LiPo, TP4056 charger, MT3608 boost converter set to 5V
 
 ## Display wiring
 
