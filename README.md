@@ -55,23 +55,6 @@ TAB switches to scroll mode (then D/X also scroll). Type `/new` in the chat to c
 - Keys and WiFi passwords are stored in the ESP32's flash (not encrypted) — don't lend the device out with your key on it.
 - Bluetooth keyboard input can lag briefly while an answer is being fetched (WiFi and Bluetooth share one radio).
 
-## Games
-Snake · Blocks · Pong · Breakout · Flappy · **Turbo** — best scores are saved in flash.
-
-### Turbo (3D racer)
-![Turbo](docs/images/turbo.png)
-
-Pseudo-3D arcade racer with curves, hills, traffic and a sunset sky. Gas is automatic.
-| Key | Action |
-|---|---|
-| **Z / C** (or ←/→) | Steer (hold) |
-| **X** (or ↓) | Brake |
-| **D** (or ↑) | Nitro (you start with 2, max 3; +1 per checkpoint) |
-| ESC | Pause |
-
-Reach each yellow **CHECKPOINT** arch before the timer hits 0 (+11 s at first, shrinking to +6 s).
-Staying off the grass keeps your speed up; hitting a car slows you down. Score = distance + 25 per car overtaken.
-
 ## Hardware summary
 | Part | Connection |
 |---|---|
